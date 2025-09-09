@@ -1,0 +1,48 @@
+# Node and Next.js
+node_modules/
+.next/
+.out/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+coverage/
+
+# Python
+venv/
+.env
+*.pyc
+__pycache__/
+*.pyo
+*.pyd
+.Python
+.python-version
+.mypy_cache/
+.pytest_cache/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+/dist/
+/build/
+
+# Local data
+spool/
+results.csv
+backend/*.sqlite
+
+# IDE
+.vscode/
+.idea/
+*.code-workspace
+
+# Credentials
+*.pem
+*.crt
+*.key
+
+# Misc
+*.swp
+*.swo
