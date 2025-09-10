@@ -1,5 +1,6 @@
 "use client";
 import Link from "next/link";
+import { ArrowRightCircle } from "lucide-react";
 import { UploadCard } from "@/components/upload-card";
 import { motion } from "framer-motion";
 
@@ -20,7 +21,14 @@ export default function Home() {
           </div>
           <p className="mt-4 text-sm md:text-base text-white/70">Upload & Analyze Documents Smarter</p>
           <div className="mt-4">
-            <Link href="/ask" className="text-sky-300 hover:text-sky-200 transition underline">Go to Ask →</Link>
+            <Link
+              href="/ask"
+              className="inline-flex items-center gap-2 px-5 py-2.5 rounded-full bg-gradient-to-r from-sky-500 to-cyan-500 text-white shadow-lg hover:from-sky-400 hover:to-cyan-400 transition focus:outline-none focus:ring-2 focus:ring-cyan-400/60"
+            >
+              <ArrowRightCircle className="w-5 h-5" aria-hidden />
+              <span className="font-semibold">Go to Ask</span>
+              <span className="sr-only">Navigate to Ask page</span>
+            </Link>
           </div>
         </motion.div>
 

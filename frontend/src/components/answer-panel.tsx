@@ -6,21 +6,17 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { EvidenceBadgeList } from "@/components/evidence-badge-list";
+import type { EvidencePassage, AnswerResponse } from "@/lib/types";
 import { toast } from "sonner";
 import { motion } from "framer-motion";
 import { Search, FileDown, MessageSquare } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion";
+import Confetti from "@/components/confetti";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
-type Passage = {
-  id: string;
-  doc_id: string;
-  ord: number;
-  text: string;
-  dist: number;
-};
+type Passage = EvidencePassage & { dist: number };
 
 export function AnswerPanel() {
   const [query, setQuery] = useState("");
@@ -36,6 +32,7 @@ export function AnswerPanel() {
   const [streaming, setStreaming] = useState<boolean>(false);
   const [evalId, setEvalId] = useState<string | null>(null);
   const [highlightIdx, setHighlightIdx] = useState<number | null>(null);
+  const [confettiTick, setConfettiTick] = useState(0);
   const passageRefs = useRef<Record<string, HTMLDivElement | null>>({});
 
   function registerPassageRef(key: string) {
@@ -164,7 +161,7 @@ export function AnswerPanel() {
         body: JSON.stringify(apiPayload),
       });
       if (!res.ok) throw new Error(await res.text());
-      const data = await res.json();
+      const data: { passages: Passage[] } = await res.json();
       setPassages(data.passages || []);
     } catch (e: any) {
       toast.error(`Search failed: ${e.message}`);
@@ -182,12 +179,13 @@ export function AnswerPanel() {
         body: JSON.stringify(apiPayload),
       });
       if (!res.ok) throw new Error(await res.text());
-      const data = await res.json();
+      const data: AnswerResponse = await res.json();
       setAnswer(data.answer || "");
-      setPassages(data.evidence || []);
+      setPassages((data.evidence as Passage[]) || []);
       setLowEvidence(data.low_evidence ?? null);
       setConfidence(typeof data.confidence === 'number' ? data.confidence : null);
       setEvalId(typeof data.eval_id === 'string' ? data.eval_id : null);
+      try { setConfettiTick(t => t + 1); } catch {}
     } catch (e: any) {
       toast.error(`Answer failed: ${e.message}`);
     } finally {
@@ -242,7 +240,8 @@ export function AnswerPanel() {
   }
 
   return (
-    <Card className="rounded-2xl bg-white/5 backdrop-blur border border-white/10 shadow-xl">
+    <Card className="relative rounded-2xl bg-white/5 backdrop-blur border border-white/10 shadow-xl overflow-hidden">
+      {confettiTick > 0 && <Confetti trigger={confettiTick} />}
       <CardHeader>
         <CardTitle className="text-xl font-bold tracking-tight">Query & Answer</CardTitle>
       </CardHeader>
@@ -303,8 +302,8 @@ export function AnswerPanel() {
                         transition={{ duration: 0.25 }}
                         className={`border rounded-xl p-3 bg-white/5 hover:scale-[1.01] transition ${highlightIdx === i + 1 ? "border-sky-400/70" : "border-white/10"}`}
                       >
-                        <div className="text-xs opacity-70 mb-1">#{i + 1} dist={p.dist.toFixed(4)}</div>
-                        <div className="text-sm line-clamp-4">{p.text}</div>
+                        <div className="text-xs opacity-70 mb-1">#{i + 1} dist={p.dist.toFixed(4)} doc={p.document_id || p.doc_id} ord={p.ord}{p.page != null ? ` p=${p.page}` : ""}</div>
+                        <div className="text-sm line-clamp-4">{p.snippet || p.text}</div>
                       </motion.div>
                     </TooltipTrigger>
                     <TooltipContent className="max-w-sm whitespace-pre-wrap text-xs">

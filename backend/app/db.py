@@ -17,10 +17,27 @@ def get_conn():
     return mysql.connector.connect(**conn_kwargs)
 
 def _embed_dim() -> int:
+    # Keep in sync with embeddings.get_embed_dim
+    from .embeddings import get_embed_dim
+    return int(get_embed_dim())
+
+def get_db_vector_dim(conn) -> int | None:
+    cur = conn.cursor()
     try:
-        return int(os.getenv("EMBED_DIM", "768"))
+        cur.execute("SHOW CREATE TABLE chunks")
+        row = cur.fetchone()
+        if not row:
+            return None
+        ddl = row[1] if len(row) > 1 else row[0]
+        import re
+        m = re.search(r"embedding\s+VECTOR\((\d+)\)", ddl, re.IGNORECASE)
+        if m:
+            return int(m.group(1))
+        return None
     except Exception:
-        return 768
+        return None
+    finally:
+        cur.close()
 
 def ensure_documents_table(conn):
     cur = conn.cursor()
@@ -95,6 +112,15 @@ def ensure_core_vector_schema(conn):
     ensure_chunks_table(conn)
     # Attempt migration in case column existed with a different type
     migrate_chunks_embedding_to_vector(conn)
+    # Verify dimension matches configured/derived dim
+    desired = _embed_dim()
+    actual = get_db_vector_dim(conn)
+    if actual is not None and actual != desired:
+        # Raise with migration hint; caller can catch and present clearly
+        raise RuntimeError(
+            f"EMBED_DIM mismatch: DB chunks.embedding=VECTOR({actual}) but configured/derived is {desired}. "
+            f"Run: ALTER TABLE chunks MODIFY COLUMN embedding VECTOR({desired}) NOT NULL;"
+        )
     # Secondary indexes commonly used
     ensure_chunks_secondary_indexes(conn)
     # Ensure TiFlash replica for analytical scans (optional)
@@ -203,7 +229,8 @@ def ensure_analytics_table(conn):
           top_doc_id CHAR(36) NULL,
           org_id VARCHAR(128) NULL,
           user_id VARCHAR(128) NULL,
-          retrieved_doc_ids JSON NULL
+          retrieved_doc_ids JSON NULL,
+          extras JSON NULL
         )
         """
     )
@@ -213,6 +240,7 @@ def ensure_analytics_table(conn):
         cur.execute("CREATE INDEX idx_analytics_topdoc ON analytics_log (top_doc_id)")
         cur.execute("CREATE INDEX idx_analytics_org ON analytics_log (org_id)")
         cur.execute("ALTER TABLE analytics_log ADD COLUMN IF NOT EXISTS user_id VARCHAR(128)")
+        cur.execute("ALTER TABLE analytics_log ADD COLUMN IF NOT EXISTS extras JSON")
         conn.commit()
     except Exception:
         conn.rollback()
@@ -223,12 +251,13 @@ def insert_analytics_event(conn, row):
     cur = conn.cursor()
     cur.execute(
         """
-        INSERT INTO analytics_log (id, route, query, latency_ms, top_doc_id, org_id, user_id, retrieved_doc_ids)
-        VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+        INSERT INTO analytics_log (id, route, query, latency_ms, top_doc_id, org_id, user_id, retrieved_doc_ids, extras)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
         """,
         (
             row.get("id"), row.get("route"), row.get("query"), row.get("latency_ms"),
             row.get("top_doc_id"), row.get("org_id"), row.get("user_id"), json.dumps(row.get("retrieved_doc_ids")),
+            json.dumps(row.get("extras")) if row.get("extras") is not None else None,
         ),
     )
     conn.commit()
@@ -530,6 +559,110 @@ def hybrid_search(conn, vector_literal, keyword, top_k, filter_category=None, or
     cur.close()
     return rows
 
+def hybrid_fusion_search(conn, vector_literal, keyword, top_k, filter_category=None, org_id=None):
+    """Hybrid retrieval with fusion (RRF) combining FULLTEXT and VECTOR candidates.
+
+    Strategy:
+    - Get FULLTEXT candidates with a relevance score when possible (NATURAL LANGUAGE MODE),
+      falling back to BOOLEAN MODE or LIKE-derived score.
+    - Get VECTOR KNN candidates with cosine distance.
+    - Compute Reciprocal Rank Fusion (RRF): 1/(k + rank_ft) + 1/(k + rank_vec),
+      with k configurable via HYBRID_RRF_K (default 60).
+    - Return top_k rows, preserving fields: id, doc_id, ord, text, dist.
+    """
+    ft_limit = max(10, int(os.getenv("HYBRID_FT_CANDIDATES", "100")))
+    vec_limit = max(top_k, int(os.getenv("HYBRID_VEC_CANDIDATES", "100")))
+    rrf_k = max(1, int(os.getenv("HYBRID_RRF_K", "60")))
+
+    cur = conn.cursor(dictionary=True)
+    # 1) FULLTEXT candidates with score
+    ft_rows: list[dict] = []
+    try:
+        if filter_category:
+            q = (
+                "SELECT c.id, c.doc_id, c.ord, c.text, "
+                "MATCH(c.text) AGAINST (%s) AS ft_score "
+                "FROM chunks c JOIN documents d ON d.id = c.doc_id "
+                "WHERE (d.org_id <=> %s OR %s IS NULL) AND JSON_UNQUOTE(JSON_EXTRACT(d.meta,'$.category')) = %s "
+                "ORDER BY ft_score DESC LIMIT %s"
+            )
+            cur.execute(q, (keyword, org_id, org_id, filter_category, ft_limit))
+        else:
+            q = (
+                "SELECT id, doc_id, ord, text, MATCH(text) AGAINST (%s) AS ft_score "
+                "FROM chunks WHERE (org_id <=> %s OR %s IS NULL) ORDER BY ft_score DESC LIMIT %s"
+            )
+            cur.execute(q, (keyword, org_id, org_id, ft_limit))
+        ft_rows = cur.fetchall() or []
+        # Drop rows with NULL ft_score
+        ft_rows = [r for r in ft_rows if r.get("ft_score") is not None]
+    except Exception:
+        # Fallback to LIKE-derived score
+        like_kw = f"%{keyword}%"
+        try:
+            if filter_category:
+                q = (
+                    "SELECT c.id, c.doc_id, c.ord, c.text, "
+                    "(LENGTH(LOWER(c.text)) - LENGTH(REPLACE(LOWER(c.text), LOWER(%s), ''))) / NULLIF(LENGTH(%s),0) AS ft_score "
+                    "FROM chunks c JOIN documents d ON d.id = c.doc_id "
+                    "WHERE c.text LIKE %s AND (d.org_id <=> %s OR %s IS NULL) AND JSON_UNQUOTE(JSON_EXTRACT(d.meta,'$.category')) = %s "
+                    "ORDER BY ft_score DESC LIMIT %s"
+                )
+                cur.execute(q, (keyword, keyword, like_kw, org_id, org_id, filter_category, ft_limit))
+            else:
+                q = (
+                    "SELECT id, doc_id, ord, text, "
+                    "(LENGTH(LOWER(text)) - LENGTH(REPLACE(LOWER(text), LOWER(%s), ''))) / NULLIF(LENGTH(%s),0) AS ft_score "
+                    "FROM chunks WHERE text LIKE %s AND (org_id <=> %s OR %s IS NULL) "
+                    "ORDER BY ft_score DESC LIMIT %s"
+                )
+                cur.execute(q, (keyword, keyword, like_kw, org_id, org_id, ft_limit))
+            ft_rows = cur.fetchall() or []
+        except Exception:
+            ft_rows = []
+
+    # 2) VECTOR candidates
+    vec_rows = knn_search(conn, vector_literal, vec_limit, filter_category, org_id)
+    # 3) Build rank maps
+    ft_rank: dict[str, int] = {}
+    for idx, r in enumerate(ft_rows):
+        try:
+            ft_rank[str(r["id"])] = idx + 1
+        except Exception:
+            continue
+    vec_rank: dict[str, int] = {}
+    vec_dist: dict[str, float] = {}
+    vec_row_map: dict[str, dict] = {}
+    for idx, r in enumerate(vec_rows):
+        try:
+            rid = str(r["id"])
+            vec_rank[rid] = idx + 1
+            vec_row_map[rid] = r
+            vec_dist[rid] = float(r.get("dist") or 0.0)
+        except Exception:
+            continue
+    # 4) RRF fusion
+    all_ids = list({*ft_rank.keys(), *vec_rank.keys()})
+    def rrf_score(rid: str) -> float:
+        rf = 1.0 / (rrf_k + ft_rank[rid]) if rid in ft_rank else 0.0
+        rv = 1.0 / (rrf_k + vec_rank[rid]) if rid in vec_rank else 0.0
+        return rf + rv
+    ranked = sorted(all_ids, key=lambda rid: rrf_score(rid), reverse=True)[:top_k]
+    # 5) Build rows with required fields
+    results = []
+    # Prefer pulling text/doc_id/ord from whichever we have
+    ft_map = {str(r["id"]): r for r in ft_rows if r.get("id") is not None}
+    for rid in ranked:
+        base = vec_row_map.get(rid) or ft_map.get(rid) or {}
+        results.append({
+            "id": rid,
+            "doc_id": base.get("doc_id"),
+            "ord": base.get("ord", 0),
+            "text": base.get("text", ""),
+            "dist": vec_dist.get(rid, 0.0),
+        })
+    return results
+
 def setup_vector_optimization(conn):
     """Optional optimization setup: ensure FULLTEXT index for hybrid and any other needed hints."""
     ensure_fulltext_index(conn)
@@ -595,21 +728,47 @@ def ensure_audit_table(conn):
         """
     )
     conn.commit()
+    # Add columns if missing
+    try:
+        cur.execute("ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS org_id VARCHAR(128)")
+        cur.execute("ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS raw_content MEDIUMTEXT")
+        conn.commit()
+    except Exception:
+        conn.rollback()
     cur.close()
 
 def insert_audit(conn, row):
     cur = conn.cursor()
     cur.execute(
         """
-        INSERT INTO audit_logs (id, user_id, route, query, evidence_ids, request_id, org_id)
-        VALUES (%s,%s,%s,%s,%s,%s,%s)
+        INSERT INTO audit_logs (id, user_id, route, query, evidence_ids, request_id, org_id, raw_content)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
         """,
         (
-            row.get("id"), row.get("user_id"), row.get("route"), row.get("query"), json.dumps(row.get("evidence_ids")), row.get("request_id"), row.get("org_id")
+            row.get("id"), row.get("user_id"), row.get("route"), row.get("query"), json.dumps(row.get("evidence_ids")), row.get("request_id"), row.get("org_id"), row.get("raw_content")
         )
     )
     conn.commit()
     cur.close()
+
+def insert_audit_raw(conn, row):
+    """Insert audit log with raw_content; fallback to insert_audit if column absent."""
+    try:
+        insert_audit(conn, row)
+    except Exception:
+        # Fallback without raw_content for compatibility
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO audit_logs (id, user_id, route, query, evidence_ids, request_id, org_id)
+            VALUES (%s,%s,%s,%s,%s,%s,%s)
+            """,
+            (
+                row.get("id"), row.get("user_id"), row.get("route"), row.get("query"), json.dumps(row.get("evidence_ids")), row.get("request_id"), row.get("org_id")
+            )
+        )
+        conn.commit()
+        cur.close()
 
 def insert_eval_log(conn, row):
     cur = conn.cursor()

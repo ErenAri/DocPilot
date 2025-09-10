@@ -1,11 +1,13 @@
 import os, io, uuid, json, logging, time
 from contextvars import ContextVar
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request
+from fastapi.responses import JSONResponse
+from fastapi import APIRouter
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from pypdf import PdfReader
-from typing import List, Dict, Any, cast, Optional, Sequence, Mapping
+from typing import List, Dict, Any, cast, Optional, Sequence, Mapping, Literal
 from opentelemetry import trace
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
@@ -15,11 +17,12 @@ from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from .schemas import IngestText, IngestFileResp, QueryReq, QueryResp, Passage, AnswerResp
 from .chunk import make_chunks
 from .embeddings import embed_texts, to_vector_literal, score_pairs, redact_pii
-from .db import get_conn, upsert_document, upsert_chunks, knn_search, hybrid_search, setup_vector_optimization, ensure_eval_table, insert_eval_log, update_eval_rating, ensure_eval_gold_tables, insert_eval_gold, insert_eval_result, ensure_audit_table, insert_audit, ensure_tenant_columns, fetch_document_text, ensure_share_links_table, insert_share_link, get_share_link, fetch_chunks_by_ids, ensure_calibration_table, get_calibration, set_calibration, ensure_chunks_secondary_indexes, compact_dedup_chunks, ensure_tiflash_replica, ensure_core_vector_schema, ensure_analytics_table, insert_analytics_event, ensure_users_tables, upsert_demo_users, get_user_by_credentials, create_session, get_user_by_token
+from .db import get_conn, upsert_document, upsert_chunks, knn_search, hybrid_search, hybrid_fusion_search, setup_vector_optimization, ensure_eval_table, insert_eval_log, update_eval_rating, ensure_eval_gold_tables, insert_eval_gold, insert_eval_result, ensure_audit_table, insert_audit, insert_audit_raw, ensure_tenant_columns, fetch_document_text, ensure_share_links_table, insert_share_link, get_share_link, fetch_chunks_by_ids, ensure_calibration_table, get_calibration, set_calibration, ensure_chunks_secondary_indexes, compact_dedup_chunks, ensure_tiflash_replica, ensure_core_vector_schema, ensure_analytics_table, insert_analytics_event, ensure_users_tables, upsert_demo_users, get_user_by_credentials, create_session, get_user_by_token
 from .answer import answer_with_evidence, get_client
 from .export import build_pdf
 from .integrations import create_jira_ticket, publish_notion_page, IntegrationError, create_linear_issue, publish_confluence_page
 import hmac, hashlib, base64, asyncio
+import jwt, datetime
 import boto3
 def compute_share_hash(data: dict) -> str:
     secret = os.getenv("SHARE_HASH_SECRET", "docpilot")
@@ -58,6 +61,52 @@ if otel_endpoint:
     trace.set_tracer_provider(provider)
     FastAPIInstrumentor.instrument_app(app)
 tracer = trace.get_tracer("docpilot")
+
+# --- Auth helpers ---
+def _extract_jwt(request: Request) -> Optional[str]:
+    """Extract JWT token from cookie in production, from Authorization header in dev."""
+    backend_env = os.getenv("BACKEND_ENV", "dev").lower()
+    node_env = os.getenv("NODE_ENV", "development").lower()
+    use_cookie_auth = (backend_env in ("prod", "production") or node_env == "production")
+    if use_cookie_auth:
+        cookie_name = os.getenv("AUTH_COOKIE_NAME", "docpilot_auth")
+        return request.cookies.get(cookie_name)
+    # Dev: Bearer header
+    token = request.headers.get("Authorization")
+    if token and token.lower().startswith("bearer "):
+        return token.split(" ", 1)[1]
+    return token
+
+# --- JWT helpers ---
+def _jwt_secret() -> str:
+    return os.getenv("JWT_SECRET", "docpilot_jwt_secret")
+
+def _jwt_exp_minutes() -> int:
+    try:
+        return int(os.getenv("JWT_EXPIRES_MIN", "120"))
+    except Exception:
+        return 120
+
+def issue_jwt_token(user_id: str, username: str | None = None, org_id: str | None = None, role: str | None = None) -> str:
+    now = datetime.datetime.utcnow()
+    payload = {
+        "sub": user_id,
+        "username": username or "",
+        "org_id": org_id,
+        "role": role or "viewer",
+        "iat": now,
+        "exp": now + datetime.timedelta(minutes=_jwt_exp_minutes()),
+        "iss": "docpilot",
+    }
+    token = jwt.encode(payload, _jwt_secret(), algorithm="HS256")
+    return token
+
+def verify_jwt_token(token: str) -> dict | None:
+    try:
+        data = jwt.decode(token, _jwt_secret(), algorithms=["HS256"])
+        return data
+    except Exception:
+        return None
 # Simple route-based policy map (used by MCP and ops)
 POLICY_REQUIRED_ROLES = {
     "mcp.tools": ["viewer", "analyst", "editor", "admin"],
@@ -206,12 +255,16 @@ async def _compact_loop():
         await asyncio.sleep(COMPACT_SECS)
 
 
-# CORS: allow all origins, methods, and headers
+# CORS: strict configuration from env
+_cors_origins = [o.strip() for o in (os.getenv("CORS_ALLOW_ORIGINS", "http://localhost:3000").split(",")) if o.strip()]
+_cors_methods = ["GET", "POST", "PUT", "DELETE", "OPTIONS"]
+_cors_headers = ["Authorization", "Content-Type", "X-Org-Id"]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=_cors_origins,
+    allow_credentials=True,
+    allow_methods=_cors_methods,
+    allow_headers=_cors_headers,
 )
 
 # Request ID and structured logging middleware
@@ -224,37 +277,56 @@ async def log_requests(request: Request, call_next):
     client_key = request.headers.get("X-Api-Key")
     if api_key_required and client_key != api_key_required:
         return JSONResponse(status_code=401, content={"error": "unauthorized", "request_id": request_id})
-    # Session token auth
-    token = request.headers.get("Authorization")
-    if token and token.lower().startswith("bearer "):
-        token = token.split(" ", 1)[1]
+    # Session token auth (cookie in prod, Bearer in dev)
+    token = _extract_jwt(request)
     user_row = None
     if token:
         try:
-            conn = get_conn()
-            user_row = get_user_by_token(conn, token)
-            conn.close()
+            # First try JWT verification
+            data = verify_jwt_token(token)
+            if data:
+                user_row = {"user_id": str(data.get("sub") or ""), "username": data.get("username"), "org_id": data.get("org_id"), "role": data.get("role")}
+                setattr(request.state, "jwt_claims", data)
+            else:
+                # Fallback to DB session token
+                conn = get_conn()
+                user_row = get_user_by_token(conn, token)
+                conn.close()
         except Exception:
             user_row = None
 
-    if isinstance(user_row, dict):
+    # Resolve org: prefer JWT claims, allow X-Org-Id to override explicitly
+    def _get_org_from_request(req: Request) -> str:
         try:
-            org_id_header = str((user_row.get("org_id"))) if user_row.get("org_id") is not None else ""
+            override = req.headers.get("X-Org-Id")
+            if override:
+                return str(override)
         except Exception:
-            org_id_header = ""
+            pass
         try:
-            user_id_header = str((user_row.get("user_id"))) if user_row.get("user_id") is not None else ""
+            claims = getattr(req.state, "jwt_claims", None)
+            if claims and claims.get("org_id"):
+                return str(claims.get("org_id"))
         except Exception:
-            user_id_header = ""
-    else:
-        org_id_header = request.headers.get("X-Org-Id") or ""
-        user_id_header = request.headers.get("X-User-Id") or ""
-    role_header = (request.headers.get("X-Role") or "viewer").lower()
+            pass
+        if isinstance(user_row, dict) and (user_row.get("org_id") is not None):
+            return str(user_row.get("org_id") or "")
+        return ""
+    def _get_user_from_request() -> str:
+        if isinstance(user_row, dict) and (user_row.get("user_id") is not None):
+            return str(user_row.get("user_id") or "")
+        return request.headers.get("X-User-Id") or ""
+    org_id_header = _get_org_from_request(request)
+    user_id_header = _get_user_from_request()
+    role_header = (str((user_row or {}).get("role")) if isinstance(user_row, dict) and (user_row or {}).get("role") else (request.headers.get("X-Role") or "viewer")).lower()
     org_id_var.set(org_id_header)
     user_id_var.set(user_id_header)
     role_var.set(role_header)
+    ORG_OPTIONAL_PATHS = {"/api/login", "/login", "/health", "/health/db", "/health/cors", "/docs", "/openapi.json"}
     if os.getenv("REQUIRE_ORG_ID", "false").lower() in ("1", "true", "yes") and not org_id_header:
-        return JSONResponse(status_code=400, content={"error": "missing X-Org-Id", "request_id": request_id})
+        path = request.url.path
+        if path not in ORG_OPTIONAL_PATHS:
+            return JSONResponse(status_code=400, content={"error": "missing org", "request_id": request_id})
     
     start_time = time.time()
     extra = {
@@ -269,6 +341,9 @@ async def log_requests(request: Request, call_next):
     try:
         # Enforce login for protected paths if required
         try:
+            # Always allow CORS preflight: let CORSMiddleware craft headers
+            if request.method.upper() == "OPTIONS":
+                return await call_next(request)
             require_login = os.getenv("REQUIRE_LOGIN", "true").lower() in ("1","true","yes")
             path = request.url.path
             public_paths = {"/api/login", "/health", "/health/db", "/metrics"}
@@ -311,12 +386,35 @@ async def log_requests(request: Request, call_next):
 def log_with_request_id(message: str, level: str = "info", **kwargs):
     """Helper to log with request_id context"""
     extra = {"request_id": request_id_var.get("")}
+    # Optional PII scrubbing in logs
+    try:
+        if os.getenv("LOG_SCRUB", "false").lower() in ("1","true","yes"):
+            from .embeddings import redact_pii as _scrub
+            if isinstance(message, str):
+                message = _scrub(message)
+            clean_kwargs = {}
+            for k, v in (kwargs or {}).items():
+                if isinstance(v, str):
+                    clean_kwargs[k] = _scrub(v)
+                else:
+                    clean_kwargs[k] = v
+            kwargs = clean_kwargs
+    except Exception:
+        pass
     extra.update(kwargs)
     getattr(logger, level)(message, extra=extra)
 
 def is_allowed(allowed_roles: list[str]) -> bool:
     role = role_var.get("viewer") or "viewer"
     return role in allowed_roles or role == "admin"
+
+def is_auditor() -> bool:
+    role = (role_var.get("viewer") or "viewer").lower()
+    return role in ("admin", "auditor")
+
+def require_audit_role():
+    if not is_auditor():
+        raise HTTPException(status_code=403, detail="forbidden")
 
 def audit_event(route: str, *, query: str | None = None, evidence_ids: list[str] | None = None):
     try:
@@ -375,14 +473,19 @@ async def startup_validation():
     primary_model = os.getenv("PRIMARY_MODEL", "gpt-4o")
     logger.info(f"Embedding model: {embed_model}")
     logger.info(f"Primary LLM model: {primary_model}")
+    # Reranker configuration
+    rerank_enabled = os.getenv("RERANK_ENABLED", "true").lower() in ("1","true","yes")
+    rerank_model = os.getenv("RERANK_MODEL") or os.getenv("RERANK_MODEL_ID") or "cross-encoder/ms-marco-MiniLM-L-6-v2"
+    logger.info(f"Reranker: {'ON' if rerank_enabled else 'OFF'} (model={rerank_model})")
     
     # Test embedding model and log dimensions
     try:
+        from .embeddings import get_embed_dim, get_embed_model_id
         test_embed = embed_texts(["test"])
         embed_dim = test_embed.shape[1] if test_embed.ndim > 1 else test_embed.shape[0]
-        logger.info(f"Embedding dimensions: {embed_dim}")
-        if embed_dim != 1024:
-            logger.warning(f"Expected 1024 dimensions, got {embed_dim}")
+        configured = get_embed_dim()
+        model_id = get_embed_model_id() or ""
+        logger.info(f"Embedding dimensions: {embed_dim} (configured/derived={configured}, model={model_id})")
     except Exception as e:
         logger.error(f"Embedding model test failed: {e}")
         raise
@@ -405,6 +508,11 @@ async def startup_validation():
         ensure_calibration_table(conn)
         conn.close()
     except Exception as e:
+        msg = str(e)
+        if "EMBED_DIM mismatch" in msg and "ALTER TABLE chunks MODIFY COLUMN embedding" in msg:
+            logger.error(msg)
+            logger.error("Suggestion: set EMBED_MODEL_ID or EMBED_DIM to desired size, then run the shown ALTER TABLE and restart.")
+            raise RuntimeError(msg)
         logger.warning(f"Vector schema/optimization setup encountered issues: {e}")
         # Don't raise - this is optional optimization
     
@@ -419,6 +527,108 @@ async def startup_validation():
     except Exception as e:
         logger.warning(f"Failed to start spool drain: {e}")
     logger.info("=== DocPilot Backend Ready ===")
+
+# --- Analytics Router (v1) ---
+analytics_router = APIRouter(prefix="/api/v1/analytics", tags=["analytics"])
+
+@analytics_router.get("/dashboard-metrics")
+async def dashboard_metrics():
+    try:
+        if not is_allowed(["analyst", "viewer", "editor", "admin", "auditor"]):
+            return JSONResponse(status_code=403, content={"error": "forbidden"})
+        # Enforce org scoping when required
+        if os.getenv("REQUIRE_ORG_ID", "false").lower() in ("1","true","yes") and not (org_id_var.get("") or None):
+            return JSONResponse(status_code=400, content={"error": "missing_org"})
+        conn = get_conn()
+        cur = conn.cursor(dictionary=True)
+
+        # 1) Live Query Feed: last 10 audit_logs with matched latency (nearest eval_logs or analytics_log)
+        cur.execute(
+            """
+            SELECT a.ts, a.query,
+                   (
+                     SELECT e.latency_ms
+                     FROM eval_logs e
+                     WHERE e.route = a.route
+                       AND e.query = a.query
+                       AND e.ts BETWEEN a.ts - INTERVAL 2 MINUTE AND a.ts + INTERVAL 2 MINUTE
+                     ORDER BY ABS(TIMESTAMPDIFF(SECOND, e.ts, a.ts)) ASC
+                     LIMIT 1
+                   ) AS latency_ms_eval,
+                   (
+                     SELECT al.latency_ms
+                     FROM analytics_log al
+                     WHERE al.route = a.route
+                       AND al.query = a.query
+                       AND al.ts BETWEEN a.ts - INTERVAL 2 MINUTE AND a.ts + INTERVAL 2 MINUTE
+                     ORDER BY ABS(TIMESTAMPDIFF(SECOND, al.ts, a.ts)) ASC
+                     LIMIT 1
+                   ) AS latency_ms_analytics
+            FROM audit_logs a
+            WHERE (a.org_id <=> %s)
+              AND a.query IS NOT NULL AND a.query <> ''
+            ORDER BY a.ts DESC
+            LIMIT 10
+            """
+        , (org_id_var.get("") or None,))
+        live_rows_any = cur.fetchall() or []
+        live_rows: List[Dict[str, Any]] = []
+        for r_any in live_rows_any:
+            r = cast(Dict[str, Any], r_any)
+            ts_val = r.get("ts")
+            ts_str = None
+            try:
+                if ts_val is None:
+                    ts_str = ""
+                elif hasattr(ts_val, "isoformat"):
+                    ts_str = ts_val.isoformat(sep=" ", timespec="seconds")  # type: ignore[attr-defined]
+                else:
+                    ts_str = str(ts_val)
+            except Exception:
+                ts_str = str(ts_val)
+            latency_ms = r.get("latency_ms_eval") if r.get("latency_ms_eval") is not None else r.get("latency_ms_analytics")
+            live_rows.append({
+                "ts": ts_str,
+                "query": r.get("query"),
+                "latency_ms": latency_ms,
+            })
+
+        # 2) Queries per minute (last 10 minutes)
+        cur.execute(
+            """
+            SELECT DATE_FORMAT(ts, '%Y-%m-%d %H:%i') AS minute,
+                   COUNT(*) AS count
+            FROM audit_logs
+            WHERE route='query' AND ts >= NOW() - INTERVAL 10 MINUTE
+            GROUP BY minute
+            ORDER BY minute ASC
+            """
+        )
+        qpm_rows_any = cur.fetchall() or []
+        qpm_rows: List[Dict[str, Any]] = [cast(Dict[str, Any], r) for r in qpm_rows_any]
+
+        # 3) Average answer rating (last hour)
+        cur.execute(
+            """
+            SELECT ROUND(AVG(rating), 2) AS avg_rating
+            FROM eval_logs
+            WHERE route='answer' AND rating IS NOT NULL AND ts >= NOW() - INTERVAL 1 HOUR
+            """
+        )
+        avg_row_any = cur.fetchone() or {}
+        avg_row = cast(Dict[str, Any], avg_row_any)
+        avg_rating = avg_row.get("avg_rating")
+
+        cur.close(); conn.close()
+        try:
+            audit_event("analytics.dashboard_metrics")
+        except Exception:
+            pass
+        return {"live_feed": live_rows, "qpm": qpm_rows, "avg_rating": avg_rating}
+    except Exception as e:
+        return standardized_error_response(e)
+
+app.include_router(analytics_router)
 
 class AnswerReq(QueryReq):
     template: str | None = "contract_response"
@@ -457,11 +667,36 @@ def answer(payload: AnswerReq, request: Request):
         # Use hybrid search if keyword provided
         if hasattr(payload, 'keyword') and payload.keyword:
             with tracer.start_as_current_span("db.search.hybrid"):
-                rows = cast(List[Dict[str, Any]], hybrid_search(conn, vector_literal, payload.keyword, payload.top_k or 10, payload.filter_category, request.headers.get("X-Org-Id")))
+                use_fusion = os.getenv("HYBRID_FUSION", "true").lower() in ("1","true","yes")
+                if use_fusion:
+                    rows = cast(List[Dict[str, Any]], hybrid_fusion_search(conn, vector_literal, payload.keyword, payload.top_k or 10, payload.filter_category, org_id_var.get("") or None))
+                else:
+                    rows = cast(List[Dict[str, Any]], hybrid_search(conn, vector_literal, payload.keyword, payload.top_k or 10, payload.filter_category, org_id_var.get("") or None))
             log_with_request_id("Used hybrid search", "debug", keyword=payload.keyword)
+            try:
+                conn3 = get_conn()
+                insert_analytics_event(conn3, {
+                    "id": str(uuid.uuid4()),
+                    "route": "hybrid",
+                    "query": payload.query,
+                    "latency_ms": None,
+                    "top_doc_id": None,
+                    "org_id": org_id_var.get("") or None,
+                    "user_id": user_id_var.get(""),
+                    "retrieved_doc_ids": [],
+                    "extras": {
+                        "route": "hybrid",
+                        "ft": int(os.getenv("HYBRID_FT_CANDIDATES", "100") or 100),
+                        "vec": int(os.getenv("HYBRID_VEC_CANDIDATES", "100") or 100),
+                        "rrf_k": int(os.getenv("HYBRID_RRF_K", "60") or 60),
+                    },
+                })
+                conn3.close()
+            except Exception:
+                pass
         else:
             with tracer.start_as_current_span("db.search.knn"):
-                rows = cast(List[Dict[str, Any]], knn_search(conn, vector_literal, payload.top_k or 10, payload.filter_category, request.headers.get("X-Org-Id")))
+                rows = cast(List[Dict[str, Any]], knn_search(conn, vector_literal, payload.top_k or 10, payload.filter_category, org_id_var.get("") or None))
             log_with_request_id("Used vector search", "debug")
         
         conn.close(); step['search_ms'] = int((time.time() - t1) * 1000)
@@ -475,7 +710,20 @@ def answer(payload: AnswerReq, request: Request):
             final_top_k = min(10, len(rows))  # Limit to 10 for reranking
         rows = rows[:final_top_k]
         
-        passages = [{"id":r["id"],"doc_id":r["doc_id"],"ord":r["ord"],"text":r["text"],"dist":float(r["dist"])} for r in rows]
+        passages = []
+        for r in rows:
+            text_val = r["text"]
+            snippet = (text_val[:240] + "…") if isinstance(text_val, str) and len(text_val) > 240 else text_val
+            passages.append({
+                "id": r["id"],
+                "doc_id": r["doc_id"],
+                "document_id": r.get("doc_id"),
+                "ord": r["ord"],
+                "text": text_val,
+                "snippet": snippet,
+                "dist": float(r["dist"]),
+                "page": None,
+            })
         model = os.getenv("PRIMARY_MODEL","gpt-4o")
         t2 = time.time()
         with tracer.start_as_current_span("llm.answer"):
@@ -483,7 +731,7 @@ def answer(payload: AnswerReq, request: Request):
         step['llm_ms'] = int((time.time() - t2) * 1000)
         latency_ms = int((time.time() - t0) * 1000)
         eval_id = str(uuid.uuid4())
-        org_id = request.headers.get("X-Org-Id")
+        org_id = org_id_var.get("") or None
         try:
             conn2 = get_conn()
             insert_eval_log(conn2, {
@@ -533,6 +781,7 @@ def answer(payload: AnswerReq, request: Request):
                 "org_id": org_id,
                 "user_id": user_id_var.get(""),
                 "retrieved_doc_ids": [p["doc_id"] for p in passages],
+                "extras": {"search_ms": step.get("search_ms")},
             })
             conn3.close()
         except Exception:
@@ -552,9 +801,9 @@ def answer_stream(payload: AnswerReq, request: Request):
         vector_literal = to_vector_literal(vec)
         conn = get_conn()
         if hasattr(payload, 'keyword') and payload.keyword:
-            rows = cast(List[Dict[str, Any]], hybrid_search(conn, vector_literal, payload.keyword, payload.top_k or 10, payload.filter_category, request.headers.get("X-Org-Id")))
+            rows = cast(List[Dict[str, Any]], hybrid_search(conn, vector_literal, payload.keyword, payload.top_k or 10, payload.filter_category, org_id_var.get("") or None))
         else:
-            rows = cast(List[Dict[str, Any]], knn_search(conn, vector_literal, payload.top_k or 10, payload.filter_category, request.headers.get("X-Org-Id")))
+            rows = cast(List[Dict[str, Any]], knn_search(conn, vector_literal, payload.top_k or 10, payload.filter_category, org_id_var.get("") or None))
         conn.close()
         rows = rerank_passages(payload.query, rows)
         rows = rows[: (payload.top_k or 10)]
@@ -600,8 +849,10 @@ def ingest_text(payload: IngestText, request: Request):
         conn = get_conn()
         org_id = request.headers.get("X-Org-Id") if request else None
         upsert_document(conn, doc_id, payload.title, payload.meta, org_id, user_id_var.get(""))
-        # DLP redaction before chunking
-        redacted_text = redact_pii(payload.text)
+        # DLP redaction before chunking (GDPR_MODE toggle)
+        gdpr_mode = os.getenv("GDPR_MODE", "false").lower() in ("1","true","yes")
+        original_text = payload.text
+        redacted_text = redact_pii(original_text) if gdpr_mode else original_text
         chunks = make_chunks(redacted_text, payload.chunk_size, payload.chunk_overlap)
         
         log_with_request_id("Generated chunks", "debug", chunk_count=len(chunks))
@@ -630,7 +881,22 @@ def ingest_text(payload: IngestText, request: Request):
             })
         
         log_with_request_id("Text ingestion completed", "info", doc_id=doc_id, chunk_count=len(rows))
-        audit_event("ingest_text", query=payload.title)
+        # Audit log: record raw content securely with org and user context
+        try:
+            conn_a = get_conn()
+            insert_audit_raw(conn_a, {
+                "id": str(uuid.uuid4()),
+                "user_id": user_id_var.get(""),
+                "route": "ingest_text",
+                "query": payload.title,
+                "evidence_ids": [],
+                "request_id": request_id_var.get(""),
+                "org_id": org_id_var.get(""),
+                "raw_content": original_text if gdpr_mode else None,
+            })
+            conn_a.close()
+        except Exception:
+            pass
         return IngestFileResp(doc_id=doc_id, chunk_count=len(rows))
     except Exception as e:
         return standardized_error_response(e)
@@ -643,8 +909,9 @@ async def ingest_file(request: Request, file: UploadFile = File(...), title: str
         log_with_request_id("Processing file ingestion", "info", filename=file.filename)
         content = await file.read()
         reader = PdfReader(io.BytesIO(content))
-        text = "\n".join([p.extract_text() or "" for p in reader.pages])
-        text = redact_pii(text)
+        text_raw = "\n".join([p.extract_text() or "" for p in reader.pages])
+        gdpr_mode = os.getenv("GDPR_MODE", "false").lower() in ("1","true","yes")
+        text = redact_pii(text_raw) if gdpr_mode else text_raw
         
         meta_obj = None
         if meta:
@@ -655,6 +922,22 @@ async def ingest_file(request: Request, file: UploadFile = File(...), title: str
         
         payload = IngestText(title=title or file.filename or "Untitled", text=text, meta=meta_obj)
         resp = ingest_text(payload, request)
+        # Audit raw for file ingest
+        try:
+            conn_a = get_conn()
+            insert_audit_raw(conn_a, {
+                "id": str(uuid.uuid4()),
+                "user_id": user_id_var.get(""),
+                "route": "ingest_file",
+                "query": payload.title,
+                "evidence_ids": [],
+                "request_id": request_id_var.get(""),
+                "org_id": org_id_var.get(""),
+                "raw_content": text_raw if gdpr_mode else None,
+            })
+            conn_a.close()
+        except Exception:
+            pass
         try:
             audit_event("ingest_file", query=payload.title)
         except Exception:
@@ -680,12 +963,16 @@ def query(payload: QueryReq, request: Request):
         # Use hybrid search if keyword provided
         if payload.keyword:
             with tracer.start_as_current_span("db.search.hybrid"):
-                rows = cast(List[Dict[str, Any]], hybrid_search(conn, vector_literal, payload.keyword, payload.top_k, payload.filter_category, request.headers.get("X-Org-Id")))
+                use_fusion = os.getenv("HYBRID_FUSION", "true").lower() in ("1","true","yes")
+                if use_fusion:
+                    rows = cast(List[Dict[str, Any]], hybrid_fusion_search(conn, vector_literal, payload.keyword, payload.top_k, payload.filter_category, org_id_var.get("") or None))
+                else:
+                    rows = cast(List[Dict[str, Any]], hybrid_search(conn, vector_literal, payload.keyword, payload.top_k, payload.filter_category, org_id_var.get("") or None))
             log_with_request_id("Used hybrid search", "debug", keyword=payload.keyword)
         else:
             # Prefer TiFlash for large scans (optimizer hint)
             with tracer.start_as_current_span("db.search.knn"):
-                rows = cast(List[Dict[str, Any]], knn_search(conn, vector_literal, payload.top_k, payload.filter_category, request.headers.get("X-Org-Id")))
+                rows = cast(List[Dict[str, Any]], knn_search(conn, vector_literal, payload.top_k, payload.filter_category, org_id_var.get("") or None))
             log_with_request_id("Used vector search", "debug")
         
         conn.close(); step['search_ms'] = int((time.time() - t1) * 1000)
@@ -770,6 +1057,10 @@ def query(payload: QueryReq, request: Request):
 
 @app.get("/health")
 def health():
+    return {"ok": True}
+
+@app.get("/health/cors")
+def health_cors():
     return {"ok": True}
 
 @app.get("/metrics")
@@ -965,8 +1256,9 @@ def analytics_summary():
               MAX(latency_ms) AS max_latency,
               SUM(low_evidence IS TRUE) AS low_evidence_count
             FROM eval_logs
+            WHERE (org_id <=> %s)
             """
-        )
+        , (org_id_var.get("") or None,))
         summary = cur.fetchone() or {}
         cur.close()
         conn.close()
@@ -991,14 +1283,15 @@ def analytics_dashboard():
             SELECT LOWER(TRIM(query)) AS q, COUNT(*) AS cnt
             FROM analytics_log
             WHERE query IS NOT NULL AND query <> ''
+              AND (org_id <=> %s)
             GROUP BY q
             ORDER BY cnt DESC
             LIMIT 5
             """
-        )
+        , (org_id_var.get("") or None,))
         top_queries = cur.fetchall()
         # Average response time
-        cur.execute("SELECT AVG(latency_ms) AS avg_latency_ms FROM analytics_log")
+        cur.execute("SELECT AVG(latency_ms) AS avg_latency_ms FROM analytics_log WHERE (org_id <=> %s)", (org_id_var.get("") or None,))
         avg_latency_row = cur.fetchone()
         avg_latency_ms = None
         try:
@@ -1013,12 +1306,12 @@ def analytics_dashboard():
             """
             SELECT top_doc_id AS doc_id, COUNT(*) AS cnt
             FROM analytics_log
-            WHERE top_doc_id IS NOT NULL
+            WHERE top_doc_id IS NOT NULL AND (org_id <=> %s)
             GROUP BY top_doc_id
             ORDER BY cnt DESC
             LIMIT 5
             """
-        )
+        , (org_id_var.get("") or None,))
         top_docs = cur.fetchall()
         cur.close(); conn.close()
         try:
@@ -1050,11 +1343,12 @@ def analytics_timeseries():
                    COUNT(*) AS total,
                    AVG(latency_ms) AS avg_latency
             FROM eval_logs
-            WHERE ts >= NOW() - INTERVAL 24 HOUR
+            WHERE (org_id <=> %s)
+              AND ts >= NOW() - INTERVAL 24 HOUR
             GROUP BY bucket
             ORDER BY bucket ASC
             """
-        )
+        , (org_id_var.get("") or None,))
         rows = cur.fetchall()
         cur.close()
         conn.close()
@@ -1315,7 +1609,7 @@ def submit_feedback(body: FeedbackBody):
         return standardized_error_response(e)
 
 @app.post("/api/login", response_model=LoginResp)
-def api_login(body: LoginBody):
+def api_login(body: LoginBody, request: Request):
     try:
         conn = get_conn()
         row = get_user_by_credentials(conn, body.username, body.password)
@@ -1337,9 +1631,60 @@ def api_login(body: LoginBody):
             org_id_value = (row.get("org_id") if isinstance(row, dict) else None)
         except Exception:
             org_id_value = None
-        token = create_session(conn, user_id_value or "")
+        # Ensure org_id is str | None for JWT typing (avoid Decimal/Unknown types)
+        try:
+            org_id_value_str = str(org_id_value) if org_id_value is not None else None
+        except Exception:
+            org_id_value_str = None
+        # Resolve default org for user (placeholder resolver)
+        def get_user_default_org(user_id: str | None) -> str:
+            try:
+                if user_id and isinstance(user_id, str) and user_id.strip():
+                    return f"org-{(user_id[:6] or 'demo').lower()}"
+            except Exception:
+                pass
+            return "org-demo-1"
+        resolved_org = get_user_default_org(user_id_value)
+        # Issue JWT with org_id and role suitable for demo flows
+        demo_role = "viewer"
+        try:
+            uname = (username_value or "").lower()
+            if uname == "admin":
+                demo_role = "admin"
+            elif uname in ("analyst", "editor"):
+                demo_role = "editor"
+        except Exception:
+            demo_role = "viewer"
+        jwt_token = issue_jwt_token(user_id_value or "", username_value, resolved_org, role=demo_role)
+        # Still create DB session for compatibility
+        _ = create_session(conn, user_id_value or "")
         conn.close()
-        return LoginResp(token=token, user_id=user_id_value or "", username=username_value or body.username, org_id=str(org_id_value) if org_id_value is not None else None)
+        # In production, set httpOnly cookie and omit token from body
+        backend_env = os.getenv("BACKEND_ENV", "dev").lower()
+        node_env = os.getenv("NODE_ENV", "development").lower()
+        use_cookie_auth = (backend_env in ("prod", "production") or node_env == "production")
+        cookie_name = os.getenv("AUTH_COOKIE_NAME", "docpilot_auth")
+        cookie_secure = (os.getenv("AUTH_COOKIE_SECURE", "true").lower() in ("1","true","yes"))
+        cookie_samesite_env = os.getenv("AUTH_COOKIE_SAMESITE", "Lax")
+        cookie_samesite: Literal['lax','strict','none'] | None = None
+        try:
+            v = (cookie_samesite_env or "Lax").strip().lower()
+            if v in ("lax","strict","none"):
+                cookie_samesite = cast(Literal['lax','strict','none'], v)
+        except Exception:
+            cookie_samesite = None
+        if use_cookie_auth:
+            resp = JSONResponse({"ok": True, "user_id": user_id_value or "", "username": username_value or body.username, "org_id": resolved_org})
+            resp.set_cookie(
+                key=cookie_name,
+                value=jwt_token,
+                httponly=True,
+                secure=cookie_secure,
+                samesite=cookie_samesite,  # "Lax" | "Strict" | "None"
+                path="/",
+            )
+            return resp
+        return LoginResp(token=jwt_token, user_id=user_id_value or "", username=username_value or body.username, org_id=resolved_org)
     except Exception as e:
         return standardized_error_response(e)
 
@@ -1393,7 +1738,20 @@ async def slack_command(request: Request):
         conn = get_conn()
         rows = cast(List[Dict[str, Any]], knn_search(conn, vector_literal, 5, None))
         conn.close()
-        passages = [{"id":r["id"],"doc_id":r["doc_id"],"ord":r["ord"],"text":r["text"],"dist":float(r["dist"])} for r in rows]
+        passages = []
+        for r in rows:
+            text_val = r["text"]
+            snippet = (text_val[:240] + "…") if isinstance(text_val, str) and len(text_val) > 240 else text_val
+            passages.append({
+                "id": r["id"],
+                "doc_id": r["doc_id"],
+                "document_id": r.get("doc_id"),
+                "ord": r["ord"],
+                "text": text_val,
+                "snippet": snippet,
+                "dist": float(r["dist"]),
+                "page": None,
+            })
         model = os.getenv("PRIMARY_MODEL","gpt-4o")
         content, is_low, conf = answer_with_evidence(text, passages, model)
         short = (content[:600] + "…") if len(content) > 600 else content
@@ -1516,10 +1874,10 @@ def analytics_insights():
         cur.execute(
             """
             SELECT query FROM eval_logs
-            WHERE route='answer' AND ts >= NOW() - INTERVAL 7 DAY AND query IS NOT NULL
+            WHERE route='answer' AND ts >= NOW() - INTERVAL 7 DAY AND query IS NOT NULL AND (org_id <=> %s)
             LIMIT 2000
             """
-        )
+        , (org_id_var.get("") or None,))
         qrows = cur.fetchall()
         intents_map = {}
         for r in qrows:
@@ -1541,11 +1899,11 @@ def analytics_insights():
             """
             SELECT DATE_FORMAT(ts, '%Y-%m-%d %H:00') AS bucket, AVG(confidence) AS avg_conf
             FROM eval_logs
-            WHERE confidence IS NOT NULL AND ts >= NOW() - INTERVAL 24 HOUR
+            WHERE confidence IS NOT NULL AND ts >= NOW() - INTERVAL 24 HOUR AND (org_id <=> %s)
             GROUP BY bucket
             ORDER BY bucket ASC
             """
-        )
+        , (org_id_var.get("") or None,))
         heatmap_rows = cur.fetchall()
         heatmap = [cast(Dict[str, Any], r) for r in heatmap_rows]
         cur.close(); conn.close()
@@ -1691,16 +2049,31 @@ def export_pdf(payload: QueryReq, request: Request):
         step['embed_ms'] = int((time.time() - t0) * 1000)
         conn = get_conn(); t1 = time.time()
         with tracer.start_as_current_span("db.search.knn"):
-            rows = cast(List[Dict[str, Any]], knn_search(conn, vector_literal, payload.top_k, payload.filter_category, request.headers.get("X-Org-Id")))
+            rows = cast(List[Dict[str, Any]], knn_search(conn, vector_literal, payload.top_k, payload.filter_category, org_id_var.get("") or None))
         conn.close(); step['search_ms'] = int((time.time() - t1) * 1000)
-        passages = [{"id":r["id"],"doc_id":r["doc_id"],"ord":r["ord"],"text":r["text"],"dist":float(r["dist"])} for r in rows]
+        passages = []
+        for r in rows:
+            text_val = r["text"]
+            snippet = (text_val[:240] + "…") if isinstance(text_val, str) and len(text_val) > 240 else text_val
+            passages.append({
+                "id": r["id"],
+                "doc_id": r["doc_id"],
+                "document_id": r.get("doc_id"),
+                "ord": r["ord"],
+                "text": text_val,
+                "snippet": snippet,
+                "dist": float(r["dist"]),
+                "page": None,
+            })
         model = os.getenv("PRIMARY_MODEL","gpt-4o")
         t2 = time.time()
         with tracer.start_as_current_span("llm.answer"):
             content, _, confidence = answer_with_evidence(payload.query, passages, model)
         step['llm_ms'] = int((time.time() - t2) * 1000)
 
-        pdf_bytes = build_pdf(content, passages)
+        # Allow template via query param (?template=contract|compliance|policy)
+        template = request.query_params.get("template") if request and request.query_params else None
+        pdf_bytes = build_pdf(content, passages, template=template)
         log_with_request_id("PDF export completed", "info")
         try:
             conn2 = get_conn()
@@ -1763,9 +2136,9 @@ def share_pdf(body: CreateShareBody, request: Request):
         vector_literal = to_vector_literal(vec)
         conn = get_conn()
         if body.keyword:
-            rows = cast(List[Dict[str, Any]], hybrid_search(conn, vector_literal, body.keyword, body.top_k or 10, body.filter_category, request.headers.get("X-Org-Id")))
+            rows = cast(List[Dict[str, Any]], hybrid_search(conn, vector_literal, body.keyword, body.top_k or 10, body.filter_category, org_id_var.get("") or None))
         else:
-            rows = cast(List[Dict[str, Any]], knn_search(conn, vector_literal, body.top_k or 10, body.filter_category, request.headers.get("X-Org-Id")))
+            rows = cast(List[Dict[str, Any]], knn_search(conn, vector_literal, body.top_k or 10, body.filter_category, org_id_var.get("") or None))
         conn.close()
         passages = [{"id":r["id"],"doc_id":r["doc_id"],"ord":r["ord"],"text":r["text"],"dist":float(r["dist"])} for r in rows]
         model = os.getenv("PRIMARY_MODEL","gpt-4o")
@@ -1820,7 +2193,21 @@ def get_shared_pdf(share_id: str, request: Request):
             evid = []
         chunks = fetch_chunks_by_ids(conn, evid or [])
         conn.close()
-        passages = [{"id":cast(Dict[str, Any], c)["id"],"doc_id":cast(Dict[str, Any], c)["doc_id"],"ord":cast(Dict[str, Any], c)["ord"],"text":cast(Dict[str, Any], c)["text"],"dist":0.0} for c in chunks]
+        passages = []
+        for c in chunks:
+            cdict = cast(Dict[str, Any], c)
+            text_val = cdict["text"]
+            snippet = (text_val[:240] + "…") if isinstance(text_val, str) and len(text_val) > 240 else text_val
+            passages.append({
+                "id": cdict["id"],
+                "doc_id": cdict["doc_id"],
+                "document_id": cdict.get("doc_id"),
+                "ord": cdict["ord"],
+                "text": text_val,
+                "snippet": snippet,
+                "dist": 0.0,
+                "page": None,
+            })
         answer_content = cast(str, row.get("answer_content") or "")
         pdf_bytes = build_pdf(answer_content, passages)
         audit_event("share_pdf_get", query=str(share_id), evidence_ids=evid or [])
@@ -1897,7 +2284,7 @@ def mcp_invoke(body: McpInvokeBody, request: Request):
 @app.get("/debug/schema")
 def debug_schema():
     try:
-        if not is_allowed(["analyst", "viewer", "editor", "admin"]):
+        if not is_auditor():
             return JSONResponse(status_code=403, content={"error": "forbidden"})
         conn = get_conn()
         cur = conn.cursor(dictionary=True)
@@ -1919,7 +2306,7 @@ def debug_schema():
 @app.post("/debug/add-fulltext")
 def add_fulltext_index():
     try:
-        if not is_allowed(["editor", "admin"]):
+        if not is_auditor():
             return JSONResponse(status_code=403, content={"error": "forbidden"})
         conn = get_conn()
         cur = conn.cursor()

@@ -21,10 +21,13 @@ class QueryReq(BaseModel):
 class Passage(BaseModel):
     id: str
     doc_id: str
+    document_id: str | None = None
     ord: int
     text: str
     dist: float
     rerank_score: Optional[float] = None
+    page: Optional[int] = None
+    snippet: Optional[str] = None
 
 class QueryResp(BaseModel):
     passages: List[Passage]

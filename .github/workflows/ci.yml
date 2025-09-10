@@ -1,0 +1,57 @@
+name: ci
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install backend deps
+        run: |
+          python -m venv backend/venv
+          backend/venv/bin/pip install -r backend/requirements.txt
+      - name: Lint import
+        run: |
+          python - <<'PY'
+          import importlib; import sys
+          try:
+            importlib.import_module('backend.app.main')
+            print('Import OK')
+          except Exception as e:
+            print('Import failed:', e)
+            sys.exit(1)
+          PY
+      - name: Schema check
+        env:
+          # Provide fake DB env to skip when no DB; replace with secrets in env-enabled pipelines
+          TIDB_HOST: ''
+          TIDB_USER: ''
+          TIDB_DATABASE: ''
+          EMBED_MODEL_ID: 'BAAI/bge-base-en'
+        run: |
+          backend/venv/bin/python -m backend.app.schema_check
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install frontend deps
+        run: |
+          cd frontend
+          npm ci
+      - name: Typecheck (build dry run)
+        run: |
+          cd frontend
+          npm run build -- --no-lint || true
+

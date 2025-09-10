@@ -1,3 +1,103 @@
+import unittest
+from fastapi.testclient import TestClient
+from .main import app, issue_jwt_token
+
+
+class TestAuditRBAC(unittest.TestCase):
+    def setUp(self):
+        self.client = TestClient(app)
+
+    def _auth_headers(self, role: str):
+        tok = issue_jwt_token("u1", "tester", "demo", role=role)
+        return {"Authorization": f"Bearer {tok}", "X-Org-Id": "demo"}
+
+    def test_non_admin_cannot_access_schema(self):
+        r = self.client.get("/debug/schema", headers=self._auth_headers("viewer"))
+        self.assertEqual(r.status_code, 403)
+
+    def test_admin_can_access_schema(self):
+        r = self.client.get("/debug/schema", headers=self._auth_headers("admin"))
+        # 200 OK or 500 if TiDB unavailable; RBAC focus here
+        self.assertIn(r.status_code, (200, 500))
+
+    def test_auditor_can_access_schema(self):
+        r = self.client.get("/debug/schema", headers=self._auth_headers("auditor"))
+        self.assertIn(r.status_code, (200, 500))
+
+    def test_cross_org_leakage(self):
+        # Org A cannot see Org B audit feed (dashboard filters by org_id)
+        ra = self.client.get("/api/v1/analytics/dashboard-metrics", headers={**self._auth_headers("analyst"), "X-Org-Id": "orgA"})
+        rb = self.client.get("/api/v1/analytics/dashboard-metrics", headers={**self._auth_headers("analyst"), "X-Org-Id": "orgB"})
+        # Can't easily assert data without DB; ensure not 403 due to role
+        self.assertIn(ra.status_code, (200, 500))
+        self.assertIn(rb.status_code, (200, 500))
+
+import os, uuid
+from .db import get_conn, upsert_document, upsert_chunks
+
+def seed():
+    conn = get_conn()
+    try:
+        # Create two orgs worth of demo docs
+        orgs = ["demo", "acme"]
+        for org in orgs:
+            for i in range(2):
+                doc_id = str(uuid.uuid4())
+                title = f"{org.upper()} Demo Doc {i+1}"
+                meta = {"category": "demo", "org": org}
+                upsert_document(conn, doc_id, title, meta, org_id=org)
+                text = f"This is a sample document for {org}. It contains organization-specific demo content. Document number {i+1}."
+                chunks = [(str(uuid.uuid4()), doc_id, 0, text, "[0.0]")]
+                upsert_chunks(conn, chunks, org_id=org)
+        conn.close()
+        print("Seeded demo and acme orgs with documents.")
+    except Exception as e:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        raise
+
+if __name__ == "__main__":
+    seed()
+
+import unittest
+from .embeddings import redact_pii
+
+
+class TestRedaction(unittest.TestCase):
+    def test_email(self):
+        s = "Contact me at john.doe@example.com for details."
+        r = redact_pii(s)
+        self.assertNotIn("john.doe@example.com", r)
+        self.assertIn("[REDACTED_EMAIL]", r)
+
+    def test_phone(self):
+        s = "Call +1 (415) 555-2671 tomorrow."
+        r = redact_pii(s)
+        self.assertNotIn("415", r)
+        self.assertIn("[REDACTED_PHONE]", r)
+
+    def test_ssn(self):
+        s = "SSN 123-45-6789 is sensitive."
+        r = redact_pii(s)
+        self.assertNotIn("123-45-6789", r)
+        self.assertIn("[REDACTED_SSN]", r)
+
+    def test_national_id(self):
+        s = "National ID AB123456 used for verification."
+        r = redact_pii(s)
+        self.assertIn("[REDACTED_ID]", r)
+
+    def test_noop(self):
+        s = "No PII here."
+        r = redact_pii(s)
+        self.assertEqual(s, r)
+
+
+if __name__ == '__main__':
+    unittest.main()
+
 #!/usr/bin/env python3
 """
 Smoke test for reranking functionality

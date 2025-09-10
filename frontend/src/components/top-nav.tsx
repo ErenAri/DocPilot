@@ -1,6 +1,6 @@
 "use client";
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 
 function NavLink({ href, label }: { href: string; label: string }) {
   const pathname = usePathname();
@@ -21,6 +21,10 @@ function NavLink({ href, label }: { href: string; label: string }) {
 }
 
 export function TopNav() {
+  const router = useRouter();
+  const [org, setOrg] = (typeof window !== "undefined")
+    ? [localStorage.getItem("docpilot_org_id") || "demo", (v: string) => { try { localStorage.setItem("docpilot_org_id", v); } catch {} }]
+    : ["demo", (_v: string) => {}];
   return (
     <div className="sticky top-0 z-50">
       <div className="backdrop-blur bg-white/5 border border-white/10 rounded-2xl shadow-xl">
@@ -47,6 +51,25 @@ export function TopNav() {
             <NavLink href="/ask" label="Ask" />
             <NavLink href="/ops" label="Ops" />
             <NavLink href="/admin" label="Admin" />
+            <select
+              defaultValue={org}
+              onChange={(e) => {
+                setOrg(e.target.value);
+                router.refresh();
+              }}
+              className="ml-2 h-8 bg-white/5 border border-white/10 rounded-md text-sm px-2"
+              title="Organization"
+            >
+              <option value="demo">demo</option>
+              <option value="acme">acme</option>
+            </select>
+            <button
+              onClick={() => {
+                try { localStorage.removeItem("docpilot_token"); } catch (_) {}
+                router.replace("/login");
+              }}
+              className="ml-2 px-3 py-1.5 rounded-md text-white/80 hover:text-white hover:bg-white/5 transition"
+            >Logout</button>
           </div>
         </div>
       </div>
