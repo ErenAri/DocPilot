@@ -16,4 +16,5 @@ opentelemetry-instrumentation-fastapi==0.46b0
 botocore==1.34.131
 boto3==1.34.131
 PyJWT==2.9.0
+SQLAlchemy>=2.0
 
