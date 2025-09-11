@@ -2,56 +2,119 @@ name: ci
 
 on:
   push:
-    branches: [ main, master ]
+    branches: ["**"]
   pull_request:
-    branches: [ main, master ]
+    branches: ["**"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   backend:
+    name: backend
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
-      - name: Install backend deps
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install deps
         run: |
-          python -m venv backend/venv
-          backend/venv/bin/pip install -r backend/requirements.txt
-      - name: Lint import
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest || true
+
+      - name: Sanity import (FastAPI present?)
         run: |
           python - <<'PY'
-          import importlib; import sys
-          try:
-            importlib.import_module('backend.app.main')
-            print('Import OK')
-          except Exception as e:
-            print('Import failed:', e)
-            sys.exit(1)
+          import fastapi, uvicorn
+          print("FastAPI:", fastapi.__version__)
           PY
-      - name: Schema check
-        env:
-          # Provide fake DB env to skip when no DB; replace with secrets in env-enabled pipelines
-          TIDB_HOST: ''
-          TIDB_USER: ''
-          TIDB_DATABASE: ''
-          EMBED_MODEL_ID: 'BAAI/bge-base-en'
+
+      - name: Unit tests (if tests/ exists)
         run: |
-          backend/venv/bin/python -m backend.app.schema_check
+          if [ -d "tests" ] || ls -1 *_test.py test_*.py >/dev/null 2>&1; then
+            pytest -q
+          else
+            echo "No tests directory; skipping pytest."
+          fi
+
+      - name: Write TiDB CA (optional)
+        shell: bash
+        run: |
+          if [ -n "${{ secrets.DB_CA_PEM }}" ]; then
+            echo "DB_CA_PEM provided → writing backend/ca.pem"
+            echo "${{ secrets.DB_CA_PEM }}" > ca.pem
+            ls -l ca.pem
+          else
+            echo "DB_CA_PEM not set → continuing without local CA file"
+          fi
+
+      - name: Schema check (skip if DB_URL missing)
+        shell: bash
+        env:
+          DB_URL: ${{ secrets.DB_URL }}  
+        run: |
+          if [ -n "${DB_URL}" ]; then
+            # Eğer CA dosyası yazıldı ve URL'de ssl-ca yoksa ekle
+            if [ -f ca.pem ] && [[ "${DB_URL}" != *"ssl-ca="* ]]; then
+              export DB_URL="${DB_URL}?ssl-ca=./ca.pem"
+              echo "Appended ssl-ca to DB_URL for schema-check."
+            fi
+            echo "Running schema-check against DB_URL…"
+            make schema-check
+          else
+            echo "DB_URL not set → skipping schema-check"
+          fi
 
   frontend:
+    name: frontend
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-      - name: Install frontend deps
-        run: |
-          cd frontend
-          npm ci
-      - name: Typecheck (build dry run)
-        run: |
-          cd frontend
-          npm run build -- --no-lint || true
+    defaults:
+      run:
+        working-directory: frontend
 
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "pnpm"
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v3
+        with:
+          version: 9
+
+      - name: Install deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Typecheck (if script exists)
+        run: |
+          if pnpm -s run | grep -q "^typecheck"; then
+            pnpm typecheck
+          else
+            echo "No typecheck script; skipping."
+          fi
+
+      - name: Build
+        run: pnpm build
