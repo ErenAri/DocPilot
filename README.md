@@ -196,4 +196,7 @@ For issues and questions:
 
 ---
 
+## Medium Article
+https://medium.com/@erenari27/docpilot-ai-powered-document-analysis-with-tidb-b077144f5034
+
 **DocPilot** - Intelligent Document Analysis Made Simple
