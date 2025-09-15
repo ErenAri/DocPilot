@@ -136,7 +136,7 @@ POLICY_REQUIRED_ROLES = {
 # Optional path-based policy guards (checked in middleware)
 POLICY_PATH_ROLES: Dict[str, list[str]] = {
     "/ingest/text": ["editor", "admin"],
-    "/ingest/file": ["editor", "admin"],
+    "/ingest/file": ["viewer", "editor", "admin"],
     "/ingest/s3": ["editor", "admin"],
     "/upload/presign": ["editor", "admin"],
     "/answer": ["viewer", "analyst", "editor", "admin"],
