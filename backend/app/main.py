@@ -9,7 +9,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from pypdf import PdfReader
 from docx import Document as DocxDocument
-from typing import List, Dict, Any, cast, Optional, Sequence, Mapping, Literal
+from typing import List, Dict, Any, cast, Optional, Sequence, Mapping, Literal, Union
 from opentelemetry import trace
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
@@ -1022,8 +1022,13 @@ async def ingest_file(request: Request, file: UploadFile = File(...), title: str
         try:
             if isinstance(meta, str) and meta:
                 _m = json.loads(meta)
-                if isinstance(_m, dict) and _m.get("page_limit") is not None:
-                    page_limit = int(_m.get("page_limit"))
+                if isinstance(_m, dict):
+                    raw_pl = _m.get("page_limit")
+                    if raw_pl is not None:
+                        try:
+                            page_limit = int(cast(Union[int, float, str, bytes, bytearray], raw_pl))
+                        except Exception:
+                            page_limit = None
         except Exception:
             page_limit = None
         if name_lower.endswith(".pdf"):

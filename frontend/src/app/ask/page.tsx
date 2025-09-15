@@ -7,7 +7,7 @@ import { Input } from "@/components/ui/input";
 import { listDocuments, getDocument, analyzeDoc, ask } from "../../../lib/actions";
 import type { DocumentInfo, AnalyzeResult, Chunk, AnswerResult } from "../../../lib/actions";
 import QAPanel from "../documents/QAPanel";
-import { toastError, toastInfo } from "@/lib/toast";
+import { toastError, toastInfo } from "../../../lib/toast";
 
 export default function AskPage() {
   const [docs, setDocs] = useState<DocumentInfo[]>([]);
