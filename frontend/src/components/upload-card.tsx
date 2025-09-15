@@ -109,6 +109,12 @@ export function UploadCard() {
       const pending = current.filter(q => q.status === "pending" || q.status === "error");
       for (const item of pending) {
         setQueue(prev => prev.map(q => q.id === item.id ? { ...q, status: "uploading", progress: 12, error: undefined } : q));
+        // Start a gentle fake progress while uploading (caps at 85%)
+        const tick = window.setInterval(() => {
+          setQueue(prev => prev.map(q => q.id === item.id && q.status === "uploading"
+            ? { ...q, progress: Math.min(85, (q.progress || 0) + 3) }
+            : q));
+        }, 700);
         try {
           const useS3 = method === "s3" || item.file.size > 5 * 1024 * 1024; // auto S3 for >5MB
           const data = await (useS3 ? uploadOneS3(item) : uploadOneDirect(item));
@@ -120,7 +126,7 @@ export function UploadCard() {
           const msg = isAbort ? "Upload timed out. Check API URL/CORS or try S3 method." : (e?.message ?? String(e));
           setQueue(prev => prev.map(q => q.id === item.id ? { ...q, status: "error", error: msg, progress: 0 } : q));
           toast.error(`${item.file.name}: ${msg}`);
-        }
+        } finally { try { window.clearInterval(tick); } catch {} }
       }
     } finally {
       setIsUploading(false);
@@ -239,12 +245,14 @@ export function UploadCard() {
           <div className="text-xs text-white/70 -mt-1 mb-2">Paste plain text to ingest without uploading a file. Handy for quick tests and small notes.</div>
           <Label htmlFor="rawtext" className="sr-only">Raw Text</Label>
           <Textarea id="rawtext" value={text} onChange={(e) => setText(e.target.value)} placeholder="Paste text..." rows={6} className="resize-y bg-white/5" />
+        </details>
+        <div className="flex justify-end">
           <Button onClick={uploadText} disabled={!text.trim() || isUploading} className="bg-gradient-to-r from-sky-500 to-cyan-500 hover:from-sky-400 hover:to-cyan-400">
             {isUploading ? "Submitting..." : (
               <span className="inline-flex items-center gap-2"><FileText className="w-4 h-4" /> Ingest Text</span>
             )}
           </Button>
-        </details>
+        </div>
       </CardContent>
     </Card>
   );
