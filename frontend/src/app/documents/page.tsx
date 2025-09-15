@@ -18,7 +18,7 @@ export default function DocumentsPage() {
   const [loading, setLoading] = useState<boolean>(true);
   const [q, setQ] = useState<string>("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [uploading, setUploading] = useState<boolean>(false);
+  // Upload removed from this page per request
   const [chunks, setChunks] = useState<Chunk[]>([]);
   const [loadingChunks, setLoadingChunks] = useState<boolean>(false);
   const [find, setFind] = useState<string>("");
@@ -29,7 +29,6 @@ export default function DocumentsPage() {
   const [asking, setAsking] = useState<boolean>(false);
   const [answer, setAnswer] = useState<AnswerResult | null>(null);
   const [askError, setAskError] = useState<string>("");
-  const fileRef = useRef<HTMLInputElement | null>(null);
   const [healthOk, setHealthOk] = useState<boolean>(true);
   const [offset, setOffset] = useState<number>(0);
   const [hasMore, setHasMore] = useState<boolean>(true);
@@ -223,23 +222,7 @@ export default function DocumentsPage() {
     });
   }, [preFiltered, q]);
 
-  async function onChooseFile(f: File) {
-    setUploading(true);
-    try {
-      const res = await ingestFile(f);
-      if (!res.ok) {
-        toastError(res.error || "Upload failed");
-      } else {
-        await refresh();
-        toastSuccess("Uploaded successfully");
-      }
-    } catch (e) {
-      console.error(e);
-      toastError("Upload failed");
-    } finally {
-      setUploading(false);
-    }
-  }
+  // Upload helpers removed
 
   function humanize(key: string) {
     const s = (key || "").replace(/_/g, " ").trim();
@@ -362,27 +345,7 @@ export default function DocumentsPage() {
       <div className="flex items-center gap-3">
         <h1 className="text-xl md:text-2xl font-semibold tracking-tight">Documents</h1>
         <div className="flex-1" />
-        <Input
-          placeholder="Search by title or meta..."
-          value={q}
-          onChange={(e) => setQ(e.target.value)}
-          className="max-w-xs h-10"
-        />
-        <input
-          ref={fileRef}
-          type="file"
-          className="hidden"
-          onChange={async (e) => {
-            const f = (e.target.files || [])[0];
-            if (f) await onChooseFile(f);
-            if (fileRef.current) fileRef.current.value = "";
-          }}
-        />
-        <Button
-          onClick={() => fileRef.current?.click()}
-          disabled={uploading}
-          className="h-10"
-        >{uploading ? "Uploading..." : "Upload"}</Button>
+        {/* Top search and upload removed */}
       </div>
 
       {/* Grid */}
@@ -393,6 +356,14 @@ export default function DocumentsPage() {
             <CardTitle className="text-base font-semibold">All Documents</CardTitle>
           </CardHeader>
           <CardContent>
+            <div className="mb-2">
+              <Input
+                placeholder="Search by title or meta..."
+                value={q}
+                onChange={(e) => setQ(e.target.value)}
+                className="h-9"
+              />
+            </div>
             {/* Filter bar */}
             <div className="mb-2 grid grid-cols-1 md:grid-cols-4 gap-2 items-end">
               <div>
