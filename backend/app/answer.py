@@ -67,6 +67,41 @@ def answer_with_evidence(query: str, passages: List[Dict], model: str) -> tuple[
     
     ev = format_evidence(passages)
     
+    # Offline LLM mode: generate a deterministic, concise draft without network
+    if os.getenv("OFFLINE_LLM", "false").lower() in ("1", "true", "yes"):
+        bullets: List[str] = []
+        for p in passages[:3]:
+            t = (p.get("text") or "").strip().replace("\n", " ")
+            if len(t) > 140:
+                t = t[:140] + "…"
+            bullets.append(f"• {t}")
+        if not bullets:
+            bullets = ["• Insufficient evidence."]
+        # Simple checklist with placeholders
+        checklist = (
+            "Item | Severity | Evidence #\n"
+            "---|---|---\n"
+            "Liability cap | High | 1\n"
+            "Termination terms | Medium | 2\n"
+            "Jurisdiction | Low | 3\n"
+        )
+        draft_lines: List[str] = []
+        for i, _ in enumerate(passages[:5], 1):
+            draft_lines.append(f"{i}. Refer to [Evidence #{i}] for relevant details.")
+        if not draft_lines:
+            draft_lines = ["1. Insufficient evidence."]
+        content = "\n".join([
+            "Executive Summary:",
+            *bullets,
+            "",
+            "Risk Checklist:",
+            checklist,
+            "",
+            "Response Draft:",
+            *draft_lines,
+        ])
+        return content.strip(), is_low_evidence, confidence
+
     # Modify system prompt if evidence is insufficient
     system_prompt = SYSTEM_PROMPT
     if is_low_evidence:

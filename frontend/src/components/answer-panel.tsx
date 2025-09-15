@@ -13,8 +13,7 @@ import { Search, FileDown, MessageSquare } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion";
 import Confetti from "@/components/confetti";
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+import { apiFetch } from "@/lib/api";
 
 type Passage = EvidencePassage & { dist: number };
 
@@ -108,7 +107,7 @@ export function AnswerPanel() {
 
   async function createLinearIssue(titleStr: string, descriptionStr: string) {
     try {
-      const res = await fetch(`${API_URL}/actions/linear`, {
+      const res = await apiFetch(`/actions/linear`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ title: titleStr, description: descriptionStr })
@@ -123,7 +122,7 @@ export function AnswerPanel() {
 
   async function publishConfluence(spaceKey: string, titleStr: string, html: string) {
     try {
-      const res = await fetch(`${API_URL}/actions/confluence`, {
+      const res = await apiFetch(`/actions/confluence`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ space_key: spaceKey, title: titleStr, content_html: html })
@@ -155,7 +154,7 @@ export function AnswerPanel() {
     setLoading(true);
     setAnswer("");
     try {
-      const res = await fetch(`${API_URL}/query`, {
+      const res = await apiFetch(`/query`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(apiPayload),
@@ -173,7 +172,7 @@ export function AnswerPanel() {
   async function doAnswer() {
     setLoading(true);
     try {
-      const res = await fetch(`${API_URL}/answer`, {
+      const res = await apiFetch(`/answer`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(apiPayload),
@@ -195,7 +194,7 @@ export function AnswerPanel() {
 
   async function doExport() {
     try {
-      const res = await fetch(`${API_URL}/export/pdf`, {
+      const res = await apiFetch(`/export/pdf`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(apiPayload),
@@ -218,7 +217,7 @@ export function AnswerPanel() {
     setAnswer("");
     setStreaming(true);
     try {
-      const res = await fetch(`${API_URL}/answer/stream`, {
+      const res = await apiFetch(`/answer/stream`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(apiPayload),
@@ -338,16 +337,14 @@ export function AnswerPanel() {
                 <button
                   className="text-xs px-2 py-1 rounded bg-white/10 hover:bg-white/15"
                   onClick={async () => {
-                    const api = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-                    await fetch(`${api}/feedback`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ eval_id: evalId, rating: 1 }) });
+                    await apiFetch(`/feedback`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ eval_id: evalId, rating: 1 }) });
                     toast.success('Thanks for the feedback!');
                   }}
                 >👍 Helpful</button>
                 <button
                   className="text-xs px-2 py-1 rounded bg-white/10 hover:bg-white/15"
                   onClick={async () => {
-                    const api = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-                    await fetch(`${api}/feedback`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ eval_id: evalId, rating: 0 }) });
+                    await apiFetch(`/feedback`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ eval_id: evalId, rating: 0 }) });
                     toast.success('Feedback recorded.');
                   }}
                 >👎 Needs work</button>

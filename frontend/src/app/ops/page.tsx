@@ -3,8 +3,7 @@ import { useEffect, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+import { apiFetch } from "@/lib/api";
 
 export default function OpsPage() {
   const [slo, setSlo] = useState<any>(null);
@@ -15,9 +14,9 @@ export default function OpsPage() {
   async function loadAll() {
     try {
       const [s1, s2, s3] = await Promise.all([
-        fetch(`${API_URL}/ops/slo`).then(r => r.json()).catch(() => null),
-        fetch(`${API_URL}/ops/status`).then(r => r.json()).catch(() => null),
-        fetch(`${API_URL}/ops/calibration`).then(r => r.json()).catch(() => null),
+        apiFetch(`/ops/slo`).then(r => r.json()).catch(() => null),
+        apiFetch(`/ops/status`).then(r => r.json()).catch(() => null),
+        apiFetch(`/ops/calibration`).then(r => r.json()).catch(() => null),
       ]);
       setSlo(s1?.slo || null);
       setStatus(s2?.ops || null);
@@ -30,7 +29,7 @@ export default function OpsPage() {
   async function runSelfHeal() {
     setLoading(true);
     try {
-      const r = await fetch(`${API_URL}/ops/self-heal`, { method: "POST" });
+      const r = await apiFetch(`/ops/self-heal`, { method: "POST" });
       const j = await r.json();
       if (!r.ok) throw new Error(j?.error || "failed");
       toast.success("Self-heal executed");
@@ -43,7 +42,7 @@ export default function OpsPage() {
   async function runCompact() {
     setLoading(true);
     try {
-      const r = await fetch(`${API_URL}/ops/compact`, { method: "POST" });
+      const r = await apiFetch(`/ops/compact`, { method: "POST" });
       const j = await r.json();
       if (!r.ok) throw new Error(j?.error || "failed");
       toast.success(`Compacted, deleted=${j.deleted}`);
@@ -56,7 +55,7 @@ export default function OpsPage() {
   async function runCalibration() {
     setLoading(true);
     try {
-      const r = await fetch(`${API_URL}/ops/calibration/run`, { method: "POST" });
+      const r = await apiFetch(`/ops/calibration/run`, { method: "POST" });
       const j = await r.json();
       if (!r.ok) throw new Error(j?.error || "failed");
       toast.success("Calibration started");

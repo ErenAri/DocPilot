@@ -18,7 +18,13 @@ bun dev
 
 Open [http://localhost:3000](http://localhost:3000) with your browser. Use the Login link and demo credentials (e.g. `admin/admin123`).
 
-The frontend calls the backend with `Authorization: Bearer <token>` stored in localStorage (`docpilot_token`).
+Auth behavior and API client:
+- All API calls use a centralized wrapper `src/lib/api.ts` (`apiFetch`).
+  - Always sends `credentials: 'include'` so cookies flow.
+  - Production (`NODE_ENV === 'production'`): no `Authorization` header is sent; backend authenticates via httpOnly cookie only.
+  - Development: if `localStorage.docpilot_token` exists, it sends `Authorization: Bearer <token>` for convenience.
+
+Backend CORS must allow your frontend origin via `CORS_ALLOW_ORIGINS`, and `NEXT_PUBLIC_API_URL` must point at the backend base URL.
 
 This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
 

@@ -2,8 +2,7 @@
 import { useEffect, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+import { apiFetch } from "@/lib/api";
 
 export function InsightsCard() {
   const [data, setData] = useState<any>(null);
@@ -12,7 +11,7 @@ export function InsightsCard() {
   async function refresh() {
     setLoading(true);
     try {
-      const res = await fetch(`${API_URL}/analytics/insights`);
+      const res = await apiFetch(`/analytics/insights`);
       const j = await res.json();
       setData(j);
     } finally {

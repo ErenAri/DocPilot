@@ -1,6 +1,8 @@
 "use client";
 import { useRef } from "react";
 import { LogIn } from "lucide-react";
+import { motion } from "framer-motion";
+import { apiFetch } from "@/lib/api";
 
 export default function LoginPage() {
   const userRef = useRef<HTMLInputElement>(null);
@@ -39,8 +41,7 @@ export default function LoginPage() {
           const username = userRef.current?.value || "";
           const password = passRef.current?.value || "";
           try {
-            const api = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-            const res = await fetch(`${api}/api/login`, {
+            const res = await apiFetch(`/ap/logn`, {
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({ username, password }),
@@ -69,14 +70,20 @@ export default function LoginPage() {
           <label className="block text-sm mb-1">Password</label>
           <input ref={passRef} name="password" type="password" className="w-full rounded bg-white/10 p-2" />
         </div>
-        <button className="w-full mt-2 bg-sky-600 hover:bg-sky-700 text-white rounded p-2">Sign In</button>
-        <div className="mt-4 text-xs opacity-80">
+        <motion.button
+          whileHover={{ y: -2 }}
+          whileTap={{ scale: 0.98 }}
+          className="w-full mt-2 bg-gradient-to-r from-sky-600 to-cyan-600 hover:from-sky-500 hover:to-cyan-500 text-white rounded p-2 shadow transition-transform"
+        >
+          <span className="font-semibold tracking-wide">Sign In</span>
+        </motion.button>
+        <div className="mt-4 text-xs text-white/90">
           <div className="mb-1 font-medium">Demo Accounts</div>
           <div className="space-y-1">
             {demos.map((d) => (
-              <div key={d.username} className="flex items-center justify-between bg-white/5 rounded px-2 py-1">
+              <div key={d.username} className="flex items-center justify-between bg-white/10 border border-white/15 rounded px-2 py-1">
                 <span>
-                  {d.label}: <span className="opacity-90">{d.username}</span> / <span className="opacity-90">{d.password}</span>
+                  {d.label}: <span className="font-mono text-sky-200">{d.username}</span> / <span className="font-mono text-sky-200">{d.password}</span>
                 </span>
                 <button
                   type="button"

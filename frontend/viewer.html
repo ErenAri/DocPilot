@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Document Viewer</title>
+    <style>
+        body { font-family: sans-serif; margin: 2em; line-height: 1.6; }
+        #doc-content { white-space: pre-wrap; background-color: #f9f9f9; border: 1px solid #ddd; padding: 1em; }
+        .chunk { margin-bottom: 1em; padding-bottom: 1em; border-bottom: 1px dashed #ccc; }
+        .chunk:last-child { border-bottom: none; }
+        h1, h2 { border-bottom: 2px solid #eee; padding-bottom: 10px; }
+        a { color: #007bff; text-decoration: none; }
+        a:hover { text-decoration: underline; }
+        .highlight { background-color: #fff7cc; box-shadow: inset 0 0 0 2px #f0c36d; }
+    </style>
+</head>
+<body>
+    <a href="/ui/index.html">&larr; Back to Document List</a>
+    <h1 id="doc-title">Loading document...</h1>
+    <div id="doc-content"></div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            const params = new URLSearchParams(window.location.search);
+            const docId = params.get('id');
+            const docTitle = params.get('title');
+            const highlightParam = params.get('highlight') || params.get('hl') || params.get('evidence');
+            const highlightIds = new Set((highlightParam || '').split(',').filter(Boolean).map(decodeURIComponent));
+
+            if (docTitle) {
+                document.getElementById('doc-title').textContent = `Viewing: ${docTitle}`;
+                document.title = docTitle;
+            }
+
+            if (!docId) {
+                document.getElementById('doc-content').textContent = 'Error: No document ID provided in the URL. Please go back and select a document.';
+                return;
+            }
+
+            const headers = new Headers({
+                'X-Org-Id': 'your-org-id', // <-- IMPORTANT: Change this if needed
+                'X-Role': 'viewer'
+            });
+
+            fetch(`/documents/${docId}`, { headers: headers })
+                .then(response => {
+                    if (!response.ok) {
+                        return response.json().then(err => { throw new Error(err.detail || `HTTP error! status: ${response.status}`) });
+                    }
+                    return response.json();
+                })
+                .then(data => {
+                    const contentDiv = document.getElementById('doc-content');
+                    contentDiv.innerHTML = ''; // Clear loading message
+
+                    let firstHighlighted = null;
+                    if (data.chunks && data.chunks.length > 0) {
+                        data.chunks.forEach(chunk => {
+                            const chunkDiv = document.createElement('div');
+                            chunkDiv.className = 'chunk';
+                            chunkDiv.textContent = chunk.text;
+                            chunkDiv.setAttribute('data-chunk-id', chunk.id);
+                            chunkDiv.setAttribute('data-chunk-ord', chunk.ord);
+
+                            if (highlightIds.has(String(chunk.id))) {
+                                chunkDiv.classList.add('highlight');
+                                if (!firstHighlighted) firstHighlighted = chunkDiv;
+                            }
+
+                            contentDiv.appendChild(chunkDiv);
+                        });
+                        if (firstHighlighted) {
+                            firstHighlighted.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                        }
+                    } else {
+                        contentDiv.textContent = 'This document has no content.';
+                    }
+                })
+                .catch(error => {
+                    console.error('Error fetching document content:', error);
+                    const contentDiv = document.getElementById('doc-content');
+                    contentDiv.textContent = `Error loading document: ${error.message}`;
+                    contentDiv.style.color = 'red';
+                });
+        });
+    </script>
+</body>
+</html>

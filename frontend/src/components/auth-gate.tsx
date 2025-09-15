@@ -11,6 +11,9 @@ export default function AuthGate({ children }: Props) {
 
   useEffect(() => {
     try {
+      // In production (cookie auth), do not gate by localStorage token.
+      if (process.env.NODE_ENV === "production") return;
+
       const token = typeof window !== "undefined" ? localStorage.getItem("docpilot_token") : null;
       const isLogin = pathname === "/login";
       // Public paths (extend if needed)

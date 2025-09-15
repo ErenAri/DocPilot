@@ -3,8 +3,7 @@ import { useEffect, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+import { apiFetch } from "@/lib/api";
 
 export function AnalyticsCard() {
   const [summary, setSummary] = useState<any>(null);
@@ -14,11 +13,11 @@ export function AnalyticsCard() {
   async function refresh() {
     setLoading(true);
     try {
-      const res = await fetch(`${API_URL}/analytics/summary`);
+      const res = await apiFetch(`/analytics/summary`);
       if (!res.ok) throw new Error(await res.text());
       const data = await res.json();
       setSummary(data.summary || data);
-      const ts = await fetch(`${API_URL}/analytics/timeseries`);
+      const ts = await apiFetch(`/analytics/timeseries`);
       if (ts.ok) {
         const j = await ts.json();
         setSeries(j.rows || []);

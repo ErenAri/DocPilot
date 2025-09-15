@@ -61,6 +61,32 @@ def ensure_documents_table(conn):
     finally:
         cur.close()
 
+def count_documents(conn, org_id: str | None) -> int:
+    cur = conn.cursor()
+    try:
+        query = "SELECT COUNT(*) FROM documents WHERE (%s IS NULL OR org_id <=> %s)"
+        cur.execute(query, (org_id, org_id))
+        result = cur.fetchone()
+        return result[0] if result else 0
+    finally:
+        cur.close()
+
+def list_documents(conn, org_id: str | None, limit: int, offset: int):
+    cur = conn.cursor(dictionary=True)
+    try:
+        query = """
+            SELECT id, title, created_at, meta
+            FROM documents
+            WHERE (%s IS NULL OR org_id <=> %s)
+            ORDER BY created_at DESC
+            LIMIT %s OFFSET %s
+        """
+        cur.execute(query, (org_id, org_id, limit, offset))
+        rows = cur.fetchall()
+        return rows
+    finally:
+        cur.close()
+
 def ensure_chunks_table(conn):
     cur = conn.cursor()
     cur.execute(
@@ -988,3 +1014,18 @@ def insert_eval_result(conn, row):
     )
     conn.commit()
     cur.close()
+
+def get_document_chunks(conn, doc_id: str, org_id: str | None):
+    cur = conn.cursor(dictionary=True)
+    try:
+        query = """
+            SELECT id, doc_id, ord, text
+            FROM chunks
+            WHERE doc_id = %s AND (%s IS NULL OR org_id <=> %s)
+            ORDER BY ord ASC
+        """
+        cur.execute(query, (doc_id, org_id, org_id))
+        rows = cur.fetchall()
+        return rows
+    finally:
+        cur.close()

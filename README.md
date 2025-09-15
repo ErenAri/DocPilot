@@ -53,16 +53,35 @@ On startup the backend will ensure/migrate tables and indexes:
 - Credentials are enabled; allowed methods: GET, POST, PUT, DELETE, OPTIONS; minimal headers: Authorization, Content-Type, X-Org-Id.
 - Test: `/health/cors` simply returns `{ ok: true }` and can be called from your frontend to verify CORS.
 
+### Frontend config
+- Set `NEXT_PUBLIC_API_URL` to your backend URL (e.g., `http://localhost:8000`).
+- Ensure backend `CORS_ALLOW_ORIGINS` includes your frontend origin (e.g., `http://localhost:3000`).
+- All frontend API calls go through a single wrapper `src/lib/api.ts` (`apiFetch`).
+  - Always sets `credentials: 'include'` so cookies are sent.
+  - Production (`NODE_ENV === 'production'`): removes any `Authorization` header (cookie-only auth).
+  - Development: if `localStorage.docpilot_token` exists, sends `Authorization: Bearer <token>` for convenience.
+
 ### Auth behavior (dev vs prod)
 - Development (default): frontend stores a JWT in localStorage (`docpilot_token`) and sends `Authorization: Bearer <token>`. Cookies are not required.
 - Production (`NODE_ENV=production` or `BACKEND_ENV=prod`): backend sets/reads an httpOnly auth cookie. Frontend will not send `Authorization` and will include credentials on fetch.
 - Config:
   - `AUTH_COOKIE_NAME` (default `docpilot_auth`)
   - `BACKEND_ENV` (e.g., `prod` to enable cookie mode)
-  - `COOKIE_SAMESITE` (default `Lax`, one of `lax|strict|none`)
+  - `COOKIE_SAMESITE` (default `Lax`, one of `Lax|Strict|None`; case-insensitive)
+  - `CROSS_SITE` (default `false`): set to `true` when frontend and backend are on different origins in production.
+
+SameSite guidance (login cookie):
+- When FE/BE are same-origin or during local development: use `Lax` (default).
+- When FE/BE are different origins in production: use `None` and `Secure`.
+- Reminder: `SameSite=None` requires HTTPS; browsers reject `None` on insecure HTTP.
+
+Dynamic behavior in backend `/ap/logn` and `/api/login`:
+- If `COOKIE_SAMESITE` is set, its value is used (`Lax|Strict|None`).
+- Otherwise, if `BACKEND_ENV=prod` (or `NODE_ENV=production`) and `CROSS_SITE=true`, the cookie is issued with `SameSite=None; Secure; HttpOnly`.
+- Otherwise, defaults to `SameSite=Lax; HttpOnly`.
 
 Test plan (3 steps):
-1) Login: POST `/api/login` with valid credentials
+1) Login: POST `/ap/logn` with valid credentials
    - Dev: response JSON includes `token`; store in localStorage
    - Prod: response sets `Set-Cookie: <AUTH_COOKIE_NAME>=...; HttpOnly; Secure; SameSite=<mode>`
 2) Authenticated API call
@@ -110,9 +129,13 @@ Example impact (sample, 100 queries on demo set):
 Latency impact is modest (+10–20 ms) due to parallelizable queries; tune candidate sizes if needed.
 - `POST /answer` – retrieve + LLM answer
 - `POST /export/pdf` – generate a PDF report
-- `POST /api/login` – obtain a session token
+- `POST /ap/logn` – obtain a session token
 - `GET /analytics` and `GET /api/analytics` – HTAP dashboard data
 - `GET /analytics/summary` and `/analytics/timeseries` – SLO and time series
+
+### Audit & Observability
+- `GET /audit/logs` returns recent audit entries (id, org_id, user_id, event, created_at, extras).
+- Access: admin and auditor roles only. Always org-scoped; no raw_content is exposed.
 
 ### Troubleshooting
 - Startup message about EMBED_DIM mismatch (e.g., DB VECTOR(768) vs configured 1024):
@@ -121,3 +144,9 @@ Latency impact is modest (+10–20 ms) due to parallelizable queries; tune candi
   - Or set `EMBED_MODEL_ID`/`EMBED_DIM` to match the DB and restart.
 - `analytics_log` missing/old: restart backend to auto-create; or drop it manually and restart.
 
+### DB URL (PyMySQL + TLS)
+- Use PyMySQL dialect with TLS CA for schema checks and CI:
+  - PowerShell: `$env:DB_URL = "mysql+pymysql://USER:PASS@HOST:4000/docpilot?ssl-ca=./ca.pem"`
+  - Bash: `export DB_URL="mysql+pymysql://USER:PASS@HOST:4000/docpilot?ssl-ca=./ca.pem"`
+- If `DB_URL` starts with `mysql://`, the tooling coerces it to `mysql+pymysql://` and logs a warning.
+- If `./ca.pem` exists and `ssl-ca` is missing, it is appended automatically.

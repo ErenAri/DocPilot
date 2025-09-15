@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>docPilot Documents</title>
+    <style>
+        body { font-family: sans-serif; margin: 2em; }
+        table { width: 100%; border-collapse: collapse; }
+        th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+        th { background-color: #f2f2f2; }
+    </style>
+</head>
+<body>
+    <h1>Uploaded Documents</h1>
+    <table id="documents-table">
+        <thead>
+            <tr>
+                <th>ID</th>
+                <th>Title</th>
+                <th>Created At</th>
+                <th>Summary</th>
+                <th>Metadata</th>
+            </tr>
+        </thead>
+        <tbody>
+            <!-- Rows will be inserted here by JavaScript -->
+        </tbody>
+    </table>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            // Replace with your actual org ID and role headers if needed for testing
+            const headers = new Headers({
+                'X-Org-Id': 'demo', // <-- IMPORTANT: Change this
+                'X-Role': 'viewer'
+            });
+
+            fetch('/documents?limit=100', { headers: headers })
+                .then(response => {
+                    if (!response.ok) {
+                        throw new Error(`HTTP error! status: ${response.status}`);
+                    }
+                    return response.json();
+                })
+                .then(data => {
+                    const tableBody = document.querySelector('#documents-table tbody');
+                    if (data && data.items) {
+                        data.items.forEach(doc => {
+                            const row = tableBody.insertRow();
+                            
+                            const linkCell = row.insertCell(0);
+                            const link = document.createElement('a');
+                            link.href = `/ui/viewer.html?id=${encodeURIComponent(doc.id)}&title=${encodeURIComponent(doc.title)}`;
+                            link.textContent = doc.id;
+                            linkCell.appendChild(link);
+
+                            row.insertCell(1).textContent = doc.title;
+                            row.insertCell(2).textContent = new Date(doc.created_at).toLocaleString();
+                            row.insertCell(3).textContent = doc.meta?.summary || '';
+                            row.insertCell(4).textContent = JSON.stringify(doc.meta);
+                        });
+                    }
+                })
+                .catch(error => {
+                    console.error('Error fetching documents:', error);
+                    const tableBody = document.querySelector('#documents-table tbody');
+                    const row = tableBody.insertRow();
+                    const cell = row.insertCell(0);
+                    cell.colSpan = 4;
+                    cell.textContent = `Error loading documents: ${error.message}. Check console and make sure backend is running.`;
+                    cell.style.color = 'red';
+                });
+        });
+    </script>
+</body>
+</html>

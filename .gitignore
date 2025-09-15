@@ -23,6 +23,7 @@ dist/
 out/
 pnpm-lock.yaml
 yarn.lock
+package-lock.json
 
 # Logs
 *.log
@@ -38,6 +39,12 @@ frontend/.env.local
 coverage/
 build/
 frontend/.vercel/
+frontend/playwright-report/
+frontend/test-results/
+frontend/.playwright/
+playwright-report/
+test-results/
+.playwright/
 
 # Node and Next.js
 node_modules/

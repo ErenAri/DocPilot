@@ -17,4 +17,29 @@ export interface AnswerResponse {
   eval_id?: string;
 }
 
+// Documents list
+export interface DocumentMeta {
+  id: string;
+  title: string;
+  created_at: string; // ISO timestamp
+  meta?: Record<string, unknown> | null;
+}
+
+export interface DocumentsListResponse {
+  items: DocumentMeta[];
+  total: number;
+}
+
+// Document details
+export interface DocumentChunk {
+  id: string;
+  ord: number;
+  text: string;
+  page?: number | null;
+}
+
+export interface DocumentDetailResponse {
+  chunks: DocumentChunk[];
+}
+
 

@@ -7,12 +7,12 @@ import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
 import { AnalyzeCard } from "@/components/analyze-card";
 import { InsightsCard } from "@/components/insights-card";
+import { apiFetch } from "@/lib/api";
 
 export default function AskPage() {
   async function seedDemo() {
     try {
-      const api = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-      const res = await fetch(`${api}/demo/seed`, { method: "POST" });
+      const res = await apiFetch(`/demo/seed`, { method: "POST" });
       if (!res.ok) throw new Error(await res.text());
       const data = await res.json();
       toast.success(`Seeded demo: doc_id=${data.doc_id} chunks=${data.chunks}`);

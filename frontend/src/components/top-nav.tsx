@@ -1,6 +1,7 @@
 "use client";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
+import { ChevronDown } from "lucide-react";
 
 function NavLink({ href, label }: { href: string; label: string }) {
   const pathname = usePathname();
@@ -48,21 +49,25 @@ export function TopNav() {
           </Link>
           <div className="flex items-center gap-1">
             <NavLink href="/" label="Ingest" />
+            <NavLink href="/documents" label="Documents" />
             <NavLink href="/ask" label="Ask" />
             <NavLink href="/ops" label="Ops" />
             <NavLink href="/admin" label="Admin" />
-            <select
-              defaultValue={org}
-              onChange={(e) => {
-                setOrg(e.target.value);
-                router.refresh();
-              }}
-              className="ml-2 h-8 bg-white/5 border border-white/10 rounded-md text-sm px-2"
-              title="Organization"
-            >
-              <option value="demo">demo</option>
-              <option value="acme">acme</option>
-            </select>
+            <div className="relative ml-2">
+              <select
+                defaultValue={org}
+                onChange={(e) => {
+                  setOrg(e.target.value);
+                  router.refresh();
+                }}
+                className="appearance-none h-8 bg-white/10 border border-white/15 rounded-md text-sm pl-2 pr-8 text-white placeholder-white/70 focus:outline-none focus:ring-2 focus:ring-cyan-400/50 focus:border-cyan-400/30"
+                title="Organization"
+              >
+                <option value="demo" className="text-black">demo</option>
+                <option value="acme" className="text-black">acme</option>
+              </select>
+              <ChevronDown className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 w-4 h-4 text-white/70" aria-hidden />
+            </div>
             <button
               onClick={() => {
                 try { localStorage.removeItem("docpilot_token"); } catch (_) {}

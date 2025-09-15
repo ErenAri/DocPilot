@@ -1,5 +1,6 @@
 # backend/scripts/schema_check.py
 import os, re, sys
+import pymysql  # ensure PyMySQL driver is available for SQLAlchemy
 from typing import Optional
 
 # ---- Config / expected dim
@@ -25,11 +26,20 @@ def expected_dim() -> Optional[int]:
         return MODEL_DIM_MAP[mid]
     return None  # unknown → we will only do connectivity check
 
+def normalize_to_pymysql(url: str) -> str:
+    """Force mysql+pymysql dialect; warn if coercing from mysql://."""
+    if url.startswith("mysql://"):
+        coerced = "mysql+pymysql://" + url[len("mysql://"):]
+        print("Schema-check: WARNING: coercing DB_URL mysql:// -> mysql+pymysql://", file=sys.stderr)
+        return coerced
+    return url
+
 def db_url_with_ca(url: str) -> str:
     # append ssl-ca if local CA exists and not already provided
-    if "ssl-ca=" not in url and os.path.exists("ca.pem"):
+    ca_path = "./ca.pem"
+    if "ssl-ca=" not in url and os.path.exists(ca_path):
         sep = "&" if "?" in url else "?"
-        url = f"{url}{sep}ssl-ca=./ca.pem"
+        url = f"{url}{sep}ssl-ca={ca_path}"
     return url
 
 def get_db_url() -> str:
@@ -44,8 +54,14 @@ def get_db_url() -> str:
         if not (host and user and pwd):
             print("Schema-check: DB_URL not set and TiDB envs missing; skipping.", file=sys.stderr)
             sys.exit(0)
-        url = f"mysql://{user}:{pwd}@{host}:{port}/{db}"
-    return db_url_with_ca(url)
+        url = f"mysql+pymysql://{user}:{pwd}@{host}:{port}/{db}"
+    url = normalize_to_pymysql(url)
+    url = db_url_with_ca(url)
+    # Log effective dialect and ssl-ca presence
+    dialect = url.split("://", 1)[0] if "://" in url else "unknown"
+    ssl_on = ("ssl-ca=" in url)
+    print(f"Schema-check: using dialect={dialect} ssl-ca={'on' if ssl_on else 'off'}", file=sys.stderr)
+    return url
 
 def main():
     url = get_db_url()

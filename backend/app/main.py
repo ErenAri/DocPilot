@@ -3,8 +3,9 @@ from contextvars import ContextVar
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request
 from fastapi.responses import JSONResponse
 from fastapi import APIRouter
-from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.responses import StreamingResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from pypdf import PdfReader
 from typing import List, Dict, Any, cast, Optional, Sequence, Mapping, Literal
@@ -17,13 +18,27 @@ from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from .schemas import IngestText, IngestFileResp, QueryReq, QueryResp, Passage, AnswerResp
 from .chunk import make_chunks
 from .embeddings import embed_texts, to_vector_literal, score_pairs, redact_pii
-from .db import get_conn, upsert_document, upsert_chunks, knn_search, hybrid_search, hybrid_fusion_search, setup_vector_optimization, ensure_eval_table, insert_eval_log, update_eval_rating, ensure_eval_gold_tables, insert_eval_gold, insert_eval_result, ensure_audit_table, insert_audit, insert_audit_raw, ensure_tenant_columns, fetch_document_text, ensure_share_links_table, insert_share_link, get_share_link, fetch_chunks_by_ids, ensure_calibration_table, get_calibration, set_calibration, ensure_chunks_secondary_indexes, compact_dedup_chunks, ensure_tiflash_replica, ensure_core_vector_schema, ensure_analytics_table, insert_analytics_event, ensure_users_tables, upsert_demo_users, get_user_by_credentials, create_session, get_user_by_token
+from .db import (
+    get_conn, upsert_document, upsert_chunks, knn_search, hybrid_search, hybrid_fusion_search, 
+    setup_vector_optimization, ensure_eval_table, insert_eval_log, update_eval_rating, 
+    ensure_eval_gold_tables, insert_eval_gold, insert_eval_result, ensure_audit_table, 
+    insert_audit, insert_audit_raw, ensure_tenant_columns, fetch_document_text, 
+    ensure_share_links_table, insert_share_link, get_share_link, fetch_chunks_by_ids, 
+    ensure_calibration_table, get_calibration, set_calibration, ensure_chunks_secondary_indexes, 
+    compact_dedup_chunks, ensure_tiflash_replica, ensure_core_vector_schema, 
+    ensure_analytics_table, insert_analytics_event, ensure_users_tables, 
+    upsert_demo_users, get_user_by_credentials, create_session, get_user_by_token, list_documents, count_documents, get_document_chunks
+)
 from .answer import answer_with_evidence, get_client
 from .export import build_pdf
 from .integrations import create_jira_ticket, publish_notion_page, IntegrationError, create_linear_issue, publish_confluence_page
+from .analysis import analyze_text_with_llm
+from fastapi import Depends, HTTPException, Query
 import hmac, hashlib, base64, asyncio
 import jwt, datetime
 import boto3
+
+
 def compute_share_hash(data: dict) -> str:
     secret = os.getenv("SHARE_HASH_SECRET", "docpilot")
     payload = json.dumps({
@@ -68,13 +83,16 @@ def _extract_jwt(request: Request) -> Optional[str]:
     backend_env = os.getenv("BACKEND_ENV", "dev").lower()
     node_env = os.getenv("NODE_ENV", "development").lower()
     use_cookie_auth = (backend_env in ("prod", "production") or node_env == "production")
+    token: Optional[str] = None
     if use_cookie_auth:
         cookie_name = os.getenv("AUTH_COOKIE_NAME", "docpilot_auth")
-        return request.cookies.get(cookie_name)
-    # Dev: Bearer header
-    token = request.headers.get("Authorization")
-    if token and token.lower().startswith("bearer "):
-        return token.split(" ", 1)[1]
+        token = request.cookies.get(cookie_name)
+    # Fallback: accept only Bearer header if present (avoid leaking Basic/opaque)
+    if not token:
+        auth = request.headers.get("Authorization")
+        if auth and auth.lower().startswith("bearer "):
+            return auth.split(" ", 1)[1]
+        return None
     return token
 
 # --- JWT helpers ---
@@ -130,6 +148,8 @@ POLICY_PATH_ROLES: Dict[str, list[str]] = {
     "/mcp/tools": ["viewer", "analyst", "editor", "admin"],
     "/mcp/invoke": ["viewer", "analyst", "editor", "admin"],
     "/debug/": ["editor", "admin"],
+    "/audit/logs": ["admin", "auditor"],
+    "/audt/logs": ["admin", "auditor"],
 }
 
 # --- Offline-first spool settings ---
@@ -261,22 +281,22 @@ _cors_methods = ["GET", "POST", "PUT", "DELETE", "OPTIONS"]
 _cors_headers = ["Authorization", "Content-Type", "X-Org-Id"]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=_cors_origins,
+    allow_origins=["*"],
     allow_credentials=True,
-    allow_methods=_cors_methods,
-    allow_headers=_cors_headers,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
+
+# Build a path to the 'frontend' directory relative to this script's location
+frontend_dir = os.path.join(os.path.dirname(__file__), "..", "..", "frontend")
+app.mount("/ui", StaticFiles(directory=frontend_dir), name="ui")
 
 # Request ID and structured logging middleware
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
     request_id = str(uuid.uuid4())[:8]
     request_id_var.set(request_id)
-    # Basic API key + org scoping
-    api_key_required = os.getenv("APP_API_KEY")
-    client_key = request.headers.get("X-Api-Key")
-    if api_key_required and client_key != api_key_required:
-        return JSONResponse(status_code=401, content={"error": "unauthorized", "request_id": request_id})
+    # Defer API key check until after JWT extraction (below). Always allow OPTIONS.
     # Session token auth (cookie in prod, Bearer in dev)
     token = _extract_jwt(request)
     user_row = None
@@ -294,6 +314,16 @@ async def log_requests(request: Request, call_next):
                 conn.close()
         except Exception:
             user_row = None
+
+    # API key check: allow requests that either present the correct X-Api-Key OR are authenticated via JWT/session.
+    api_key_required = os.getenv("APP_API_KEY")
+    client_key = request.headers.get("X-Api-Key")
+    path = request.url.path
+    EXEMPT_APIKEY_PREFIXES = ("/ui/", "/favicon.ico", "/docs", "/openapi.json", "/documents")
+    if request.method.upper() != "OPTIONS":
+        if not any(path.startswith(p) for p in EXEMPT_APIKEY_PREFIXES):
+            if api_key_required and client_key != api_key_required and not isinstance(user_row, dict):
+                return JSONResponse(status_code=401, content={"error": "unauthorized", "request_id": request_id})
 
     # Resolve org: prefer JWT claims, allow X-Org-Id to override explicitly
     def _get_org_from_request(req: Request) -> str:
@@ -322,10 +352,12 @@ async def log_requests(request: Request, call_next):
     org_id_var.set(org_id_header)
     user_id_var.set(user_id_header)
     role_var.set(role_header)
-    ORG_OPTIONAL_PATHS = {"/api/login", "/login", "/health", "/health/db", "/health/cors", "/docs", "/openapi.json"}
-    if os.getenv("REQUIRE_ORG_ID", "false").lower() in ("1", "true", "yes") and not org_id_header:
+    ORG_OPTIONAL_PATHS = {"/api/login", "/ap/logn", "/login", "/health", "/health/db", "/health/cors", "/docs", "/openapi.json", "/ui/", "/favicon.ico"}
+    require_org = os.getenv("REQUIRE_ORG_ID", "false").lower() in ("1", "true", "yes")
+    if require_org and not org_id_header and request.method.upper() != "OPTIONS":
         path = request.url.path
-        if path not in ORG_OPTIONAL_PATHS:
+        # Allow optional for any path that starts with whitelisted prefixes
+        if not any(path.startswith(p) for p in ORG_OPTIONAL_PATHS):
             return JSONResponse(status_code=400, content={"error": "missing org", "request_id": request_id})
     
     start_time = time.time()
@@ -346,8 +378,8 @@ async def log_requests(request: Request, call_next):
                 return await call_next(request)
             require_login = os.getenv("REQUIRE_LOGIN", "true").lower() in ("1","true","yes")
             path = request.url.path
-            public_paths = {"/api/login", "/health", "/health/db", "/metrics"}
-            if require_login and (path not in public_paths) and not isinstance(user_row, dict):
+            public_prefixes = ("/api/login", "/ap/logn", "/health", "/health/db", "/metrics", "/ui/", "/favicon.ico", "/docs", "/openapi.json", "/documents")
+            if require_login and (not any(path.startswith(p) for p in public_prefixes)) and not isinstance(user_row, dict):
                 return JSONResponse(status_code=401, content={"error": "auth_required", "request_id": request_id})
         except Exception:
             pass
@@ -448,8 +480,30 @@ async def startup_validation():
     """Validate configuration and log system info on startup"""
     logger.info("=== DocPilot Backend Starting ===")
     
+    # DB URL dialect/tls check (if provided)
+    try:
+        raw_url = os.getenv("DB_URL")
+        if raw_url:
+            url = raw_url
+            if url.startswith("mysql://"):
+                url = "mysql+pymysql://" + url[len("mysql://"):]
+                logger.warning("DB_URL coerced from mysql:// to mysql+pymysql:// for PyMySQL driver")
+            if ("ssl-ca=" not in url) and os.path.exists(os.path.join(os.getcwd(), "ca.pem")):
+                sep = "&" if ("?" in url) else "?"
+                url = f"{url}{sep}ssl-ca=./ca.pem"
+            dialect = url.split("://", 1)[0] if "://" in url else "unknown"
+            ssl_on = ("ssl-ca=" in url)
+            logger.info(f"DB URL: dialect={dialect} ssl_ca={'on' if ssl_on else 'off'}")
+        else:
+            logger.info("DB URL: not set (using direct mysql-connector env configuration)")
+    except Exception:
+        pass
+
     # Check required environment variables
-    required_envs = ["TIDB_HOST", "TIDB_USER", "TIDB_PASSWORD", "TIDB_DATABASE", "OPENAI_API_KEY"]
+    offline_llm = os.getenv("OFFLINE_LLM", "false").lower() in ("1","true","yes")
+    required_envs = ["TIDB_HOST", "TIDB_USER", "TIDB_PASSWORD", "TIDB_DATABASE"]
+    if not offline_llm:
+        required_envs.append("OPENAI_API_KEY")
     missing_envs = [env for env in required_envs if not os.getenv(env)]
     if missing_envs:
         logger.error(f"Missing required environment variables: {missing_envs}")
@@ -530,6 +584,53 @@ async def startup_validation():
 
 # --- Analytics Router (v1) ---
 analytics_router = APIRouter(prefix="/api/v1/analytics", tags=["analytics"])
+
+class DocumentInfo(BaseModel):
+    id: str
+    title: str
+    created_at: str
+    meta: Optional[dict]
+
+class DocumentListResp(BaseModel):
+    items: List[DocumentInfo]
+    total: int
+
+@app.get("/documents", response_model=DocumentListResp, tags=["documents"])
+def list_docs(limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0)):
+    if not is_allowed(["viewer", "analyst", "editor", "admin"]):
+        raise HTTPException(status_code=403, detail="forbidden")
+    
+    org_id = org_id_var.get(None)
+    conn = None
+    try:
+        conn = get_conn()
+        
+        # Fetch total count and paginated documents efficiently
+        total_count = count_documents(conn, org_id)
+        docs = list_documents(conn, org_id, limit, offset)
+
+        items: List[DocumentInfo] = []
+        for doc in cast(List[Dict[str, Any]], docs):
+            raw_meta = doc.get("meta")
+            meta_obj: Optional[dict] = None
+            try:
+                if isinstance(raw_meta, dict):
+                    meta_obj = raw_meta
+                elif isinstance(raw_meta, str) and raw_meta.strip():
+                    import json as _json
+                    meta_obj = cast(Optional[dict], _json.loads(raw_meta))
+            except Exception:
+                meta_obj = None
+            items.append(DocumentInfo(
+                id=str(doc.get("id")),
+                title=str(doc.get("title")),
+                created_at=str(doc.get("created_at")),
+                meta=meta_obj
+            ))
+        return DocumentListResp(items=items, total=total_count)
+    finally:
+        if conn:
+            conn.close()
 
 @analytics_router.get("/dashboard-metrics")
 async def dashboard_metrics():
@@ -847,8 +948,14 @@ def ingest_text(payload: IngestText, request: Request):
         
         doc_id = str(uuid.uuid4())
         conn = get_conn()
-        org_id = request.headers.get("X-Org-Id") if request else None
-        upsert_document(conn, doc_id, payload.title, payload.meta, org_id, user_id_var.get(""))
+        org_id = org_id_var.get(None) # Use context var
+
+        # --- New: Analyze text for summary and keywords ---
+        analysis_results = analyze_text_with_llm(payload.text)
+        merged_meta = {**(payload.meta or {}), **analysis_results}
+        # ---
+
+        upsert_document(conn, doc_id, payload.title, merged_meta, org_id, user_id_var.get(""))
         # DLP redaction before chunking (GDPR_MODE toggle)
         gdpr_mode = os.getenv("GDPR_MODE", "false").lower() in ("1","true","yes")
         original_text = payload.text
@@ -1664,15 +1771,35 @@ def api_login(body: LoginBody, request: Request):
         node_env = os.getenv("NODE_ENV", "development").lower()
         use_cookie_auth = (backend_env in ("prod", "production") or node_env == "production")
         cookie_name = os.getenv("AUTH_COOKIE_NAME", "docpilot_auth")
-        cookie_secure = (os.getenv("AUTH_COOKIE_SECURE", "true").lower() in ("1","true","yes"))
-        cookie_samesite_env = os.getenv("AUTH_COOKIE_SAMESITE", "Lax")
-        cookie_samesite: Literal['lax','strict','none'] | None = None
+        # Dynamic SameSite handling:
+        # - If BACKEND_ENV=prod (or NODE_ENV=production) and CROSS_SITE=true, default to SameSite=None and Secure=true
+        # - Otherwise default to SameSite=Lax
+        # - Allow override via COOKIE_SAMESITE env (values: Lax|Strict|None)
+        cross_site = os.getenv("CROSS_SITE", "false").lower() in ("1", "true", "yes")
+        # Default secure true; ensure it's true in cross-site prod scenario
+        cookie_secure = True
+        # Back-compat override if provided, but never disable secure when cross-site + prod
         try:
-            v = (cookie_samesite_env or "Lax").strip().lower()
-            if v in ("lax","strict","none"):
-                cookie_samesite = cast(Literal['lax','strict','none'], v)
+            env_secure = os.getenv("AUTH_COOKIE_SECURE") or os.getenv("COOKIE_SECURE")
+            if env_secure is not None:
+                cookie_secure = (str(env_secure).lower() in ("1", "true", "yes"))
         except Exception:
-            cookie_samesite = None
+            pass
+        if use_cookie_auth and cross_site:
+            cookie_secure = True
+
+        cookie_samesite_raw = os.getenv("COOKIE_SAMESITE")
+        if cookie_samesite_raw is None:
+            # Fallback to old name for compatibility
+            cookie_samesite_raw = os.getenv("AUTH_COOKIE_SAMESITE")
+        # Compute default if not explicitly provided
+        if not cookie_samesite_raw or not str(cookie_samesite_raw).strip():
+            cookie_samesite_choice = "none" if (use_cookie_auth and cross_site) else "lax"
+        else:
+            cookie_samesite_choice = str(cookie_samesite_raw).strip().lower()
+        cookie_samesite: Literal['lax','strict','none'] | None = None
+        if cookie_samesite_choice in ("lax", "strict", "none"):
+            cookie_samesite = cast(Literal['lax','strict','none'], cookie_samesite_choice)
         if use_cookie_auth:
             resp = JSONResponse({"ok": True, "user_id": user_id_value or "", "username": username_value or body.username, "org_id": resolved_org})
             resp.set_cookie(
@@ -1687,6 +1814,16 @@ def api_login(body: LoginBody, request: Request):
         return LoginResp(token=jwt_token, user_id=user_id_value or "", username=username_value or body.username, org_id=resolved_org)
     except Exception as e:
         return standardized_error_response(e)
+
+# New standardized login route: /ap/logn
+@app.post("/ap/logn", response_model=LoginResp)
+def ap_logn(body: LoginBody, request: Request):
+    return api_login(body, request)
+
+# Backward-compat redirect from /login -> /ap/logn
+@app.get("/login")
+def login_redirect():
+    return RedirectResponse(url="/ap/logn", status_code=307)
 
 # --- Slack slash command integration ---
 class SlackSlashBody(BaseModel):
@@ -2370,3 +2507,114 @@ def demo_seed_batch():
         return {"status": "ok", "docs": len(samples), "chunks": total_chunks}
     except Exception as e:
         return standardized_error_response(e)
+
+class AuditRow(BaseModel):
+    id: int
+    org_id: Optional[str]
+    user_id: Optional[str]
+    event: str
+    created_at: str
+    extras: Optional[dict]
+
+ 
+
+@app.get("/audit/logs", response_model=List[AuditRow])
+@app.get("/audt/logs", response_model=List[AuditRow])
+def audit_logs(limit: int = Query(50, ge=1, le=200), lt: Optional[int] = Query(None, alias="lt")):
+    require_audit_role()
+    org_id = org_id_var.get(None)
+    try:
+        if isinstance(lt, int):
+            # Prefer lt query param if provided
+            limit = max(1, min(lt, 200))
+    except Exception:
+        pass
+    rows_any = []
+    conn = get_conn()
+    cur = None
+    try:
+        cur = conn.cursor(dictionary=True)
+        cur.execute(
+            """
+            SELECT id, org_id, user_id, route AS event, ts AS created_at, NULL AS extras
+            FROM audit_logs
+            WHERE (%s IS NULL OR org_id <=> %s)
+            ORDER BY id DESC
+            LIMIT %s
+            """,
+            (org_id, org_id, limit),
+        )
+        rows_any = cur.fetchall() or []
+    finally:
+        try:
+            if cur is not None:
+                cur.close()
+        finally:
+            conn.close()
+    items: List[AuditRow] = []
+    for r_any in rows_any:
+        r = cast(Dict[str, Any], r_any)
+        id_raw = r.get("id")
+        if id_raw is None:
+            continue
+        # Normalize id to int for backward-compatible schema
+        if isinstance(id_raw, int):
+            id_val = id_raw
+        else:
+            try:
+                id_val = int(str(id_raw))
+            except Exception:
+                try:
+                    # Fallback: deterministic 32-bit integer from string id
+                    import zlib
+                    id_val = int(zlib.crc32(str(id_raw).encode("utf-8")) & 0xFFFFFFFF)
+                except Exception:
+                    continue
+        org_val = r.get("org_id")
+        user_val = r.get("user_id")
+        items.append(AuditRow(
+            id=id_val,
+            org_id=(str(org_val) if org_val is not None else None),
+            user_id=(str(user_val) if user_val is not None else None),
+            event=str(r.get("event")),
+            created_at=str(r.get("created_at")),
+            extras=cast(Optional[dict], r.get("extras")),
+        ))
+    return items
+
+class DocumentChunk(BaseModel):
+    id: str
+    doc_id: str
+    ord: int
+    text: str
+
+class DocumentContentResp(BaseModel):
+    chunks: List[DocumentChunk]
+
+@app.get("/documents/{doc_id}", response_model=DocumentContentResp, tags=["documents"])
+def get_document_content(doc_id: str):
+    if not is_allowed(["viewer", "analyst", "editor", "admin"]):
+        raise HTTPException(status_code=403, detail="forbidden")
+    
+    org_id = org_id_var.get(None)
+    conn = None
+    try:
+        conn = get_conn()
+        chunks_data = get_document_chunks(conn, doc_id, org_id)
+        
+        if not chunks_data:
+            raise HTTPException(status_code=404, detail="Document not found or has no content")
+
+        chunks = [
+            DocumentChunk(
+                id=str(chunk.get("id")),
+                doc_id=str(chunk.get("doc_id")),
+                ord=int(chunk.get("ord", 0)),
+                text=str(chunk.get("text"))
+            ) for chunk in cast(List[Dict[str, Any]], chunks_data)
+        ]
+        return DocumentContentResp(chunks=chunks)
+    finally:
+        if conn:
+            conn.close()
+

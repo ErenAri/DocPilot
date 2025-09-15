@@ -4,8 +4,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { toast } from "sonner";
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+import { apiFetch } from "@/lib/api";
 
 export function AnalyzeCard() {
   const [docId, setDocId] = useState("");
@@ -15,7 +14,7 @@ export function AnalyzeCard() {
   async function run() {
     setLoading(true);
     try {
-      const res = await fetch(`${API_URL}/analyze/doc`, {
+      const res = await apiFetch(`/analyze/doc`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ doc_id: docId || '' })

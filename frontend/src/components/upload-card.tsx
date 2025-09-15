@@ -1,5 +1,6 @@
 "use client";
 import { useCallback, useMemo, useState } from "react";
+import { useEffect } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -14,8 +15,6 @@ import { useRef } from "react";
 import { FolderOpen } from "lucide-react";
 import { motion } from "framer-motion";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-
 export function UploadCard() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [files, setFiles] = useState<File[]>([]);
@@ -28,18 +27,37 @@ export function UploadCard() {
 
   type QueueItem = { id: string; file: File; status: "pending" | "uploading" | "done" | "error"; progress: number; error?: string };
   const [queue, setQueue] = useState<QueueItem[]>([]);
+  const queueRef = useRef<QueueItem[]>([]);
+  useEffect(() => { queueRef.current = queue; }, [queue]);
+  // Auto-start when there are pending items and not currently uploading
+  useEffect(() => {
+    const hasPending = (queueRef.current || []).some(q => q.status === "pending");
+    if (hasPending && !isUploading) {
+      setTimeout(() => { processQueue(); }, 0);
+    }
+  }, [queue, isUploading]);
   const [confettiTick, setConfettiTick] = useState(0);
 
-  const onDrop = useCallback((e: React.DragEvent<HTMLDivElement>) => {
+  const onDrop = useCallback(async (e: React.DragEvent<HTMLDivElement>) => {
     e.preventDefault();
-    const fl = Array.from(e.dataTransfer.files || []).filter(f => f.type === "application/pdf");
-    if (fl.length) addToQueue(fl);
+    const fl = Array.from(e.dataTransfer.files || []).filter(f => {
+      const isPdfType = f.type === "application/pdf";
+      const isPdfName = (f.name || "").toLowerCase().endsWith(".pdf");
+      return isPdfType || isPdfName;
+    });
+    if (fl.length) {
+      addToQueue(fl);
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+      processQueue();
+    }
   }, []);
 
   function addToQueue(selected: File[]) {
     const next = selected.map((f) => ({ id: `${f.name}-${f.size}-${Date.now()}`, file: f, status: "pending" as const, progress: 0 }));
     setFiles(prev => [...prev, ...selected]);
     setQueue(prev => [...prev, ...next]);
+    // Schedule immediate processing on next tick to use updated state
+    setTimeout(() => { processQueue(); }, 0);
   }
 
   async function uploadOneDirect(item: QueueItem) {
@@ -47,7 +65,7 @@ export function UploadCard() {
     form.append("file", item.file);
     form.append("title", title || item.file.name);
     form.append("meta", JSON.stringify({ ocr, auto_split: autoSplit }));
-    const res = await apiFetch(`/ingest/file`, { method: "POST", body: form, timeoutMs: 60000 });
+    const res = await apiFetch(`/ingest/file`, { method: "POST", body: form, timeoutMs: 180000 });
     if (!res.ok) throw new Error(await res.text());
     return await res.json();
   }
@@ -68,18 +86,19 @@ export function UploadCard() {
   }
 
   async function uploadOneS3(item: QueueItem) {
-    const presignRes = await apiFetch(`/upload/presign`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ filename: item.file.name, content_type: item.file.type || "application/octet-stream" }) });
+    const presignRes = await apiFetch(`/upload/presign`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ filename: item.file.name, content_type: item.file.type || "application/octet-stream" }), timeoutMs: 60000 });
     if (!presignRes.ok) throw new Error(await presignRes.text());
     const { url, key, bucket } = await presignRes.json();
     const putRes = await fetch(url, { method: "PUT", headers: { "Content-Type": item.file.type || "application/octet-stream" }, body: item.file });
     if (!putRes.ok) throw new Error(`S3 upload failed: ${putRes.status}`);
-    const ingestRes = await apiFetch(`/ingest/s3`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ key, bucket, title: title || item.file.name, meta: { ocr, auto_split: autoSplit } }) });
+    const ingestRes = await apiFetch(`/ingest/s3`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ key, bucket, title: title || item.file.name, meta: { ocr, auto_split: autoSplit } }), timeoutMs: 120000 });
     if (!ingestRes.ok) throw new Error(await ingestRes.text());
     return await ingestRes.json();
   }
 
   async function processQueue() {
-    if (queue.length === 0) {
+    const current = queueRef.current || [];
+    if (current.length === 0) {
       toast.info("Add a PDF first.");
       return;
     }
@@ -87,17 +106,20 @@ export function UploadCard() {
     // Let the UI paint the loading state before we start uploads
     await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
     try {
-      const pending = queue.filter(q => q.status === "pending" || q.status === "error");
+      const pending = current.filter(q => q.status === "pending" || q.status === "error");
       for (const item of pending) {
         setQueue(prev => prev.map(q => q.id === item.id ? { ...q, status: "uploading", progress: 12, error: undefined } : q));
         try {
-          const data = await (method === "direct" ? uploadOneDirect(item) : uploadOneS3(item));
+          const useS3 = method === "s3" || item.file.size > 5 * 1024 * 1024; // auto S3 for >5MB
+          const data = await (useS3 ? uploadOneS3(item) : uploadOneDirect(item));
           toast.success(`Uploaded ${item.file.name}: doc_id=${data.doc_id}`);
           setQueue(prev => prev.map(q => q.id === item.id ? { ...q, status: "done", progress: 100 } : q));
           setConfettiTick(t => t + 1);
         } catch (e: any) {
-          setQueue(prev => prev.map(q => q.id === item.id ? { ...q, status: "error", error: e.message ?? String(e), progress: 0 } : q));
-          toast.error(`${item.file.name}: ${e.message}`);
+          const isAbort = e?.name === "AbortError";
+          const msg = isAbort ? "Upload timed out. Check API URL/CORS or try S3 method." : (e?.message ?? String(e));
+          setQueue(prev => prev.map(q => q.id === item.id ? { ...q, status: "error", error: msg, progress: 0 } : q));
+          toast.error(`${item.file.name}: ${msg}`);
         }
       }
     } finally {
@@ -178,14 +200,7 @@ export function UploadCard() {
             >
               <span className="inline-flex items-center gap-2"><FolderOpen className="w-4 h-4" /> Choose File</span>
             </Button>
-            {/* Auto-starts after choose; keep manual start if needed */}
-            {!isUploading && queue.length > 0 && (
-              <div className="flex gap-2 mt-2">
-                <Button onClick={processQueue} className="bg-gradient-to-r from-sky-500 to-cyan-500 hover:from-sky-400 hover:to-cyan-400">
-                  <span className="inline-flex items-center gap-2"><Upload className="w-4 h-4" /> Start Upload</span>
-                </Button>
-              </div>
-            )}
+            {/* Auto-starts after choose/drop; manual start removed by request */}
           </div>
         </div>
 
@@ -203,7 +218,13 @@ export function UploadCard() {
                   <div className="flex items-center gap-2">
                     <div className="w-32 h-2 bg-white/10 rounded"><div className="h-2 bg-sky-500 rounded" style={{ width: `${item.progress}%` }} /></div>
                     {item.status === "error" && (
-                      <Button size="sm" onClick={() => setQueue(prev => prev.map(q => q.id === item.id ? { ...q, status: "pending", error: undefined } : q))}>Retry</Button>
+                      <Button
+                        size="sm"
+                        onClick={() => {
+                          setQueue(prev => prev.map(q => q.id === item.id ? { ...q, status: "pending", error: undefined } : q));
+                          setTimeout(() => { processQueue(); }, 0);
+                        }}
+                      >Retry</Button>
                     )}
                     <Button size="sm" variant="outline" onClick={() => setQueue(prev => prev.filter(q => q.id !== item.id))}>Remove</Button>
                   </div>
