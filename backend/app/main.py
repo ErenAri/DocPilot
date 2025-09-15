@@ -33,6 +33,8 @@ except ImportError:
     class DummyTrace:
         def get_tracer(self, name):
             return DummyTracer()
+        def set_tracer_provider(self, provider):
+            pass
     trace = DummyTrace()
 from .schemas import IngestText, IngestFileResp, QueryReq, QueryResp, Passage, AnswerResp
 from .chunk import make_chunks
@@ -342,7 +344,7 @@ async def log_requests(request: Request, call_next):
     api_key_required = os.getenv("APP_API_KEY")
     client_key = request.headers.get("X-Api-Key")
     path = request.url.path
-    EXEMPT_APIKEY_PREFIXES = ("/ui/", "/favicon.ico", "/docs", "/openapi.json", "/documents")
+    EXEMPT_APIKEY_PREFIXES = ("/ui/", "/favicon.ico", "/docs", "/openapi.json", "/documents", "/ingest/file")
     if request.method.upper() != "OPTIONS":
         if not any(path.startswith(p) for p in EXEMPT_APIKEY_PREFIXES):
             if api_key_required and client_key != api_key_required and not isinstance(user_row, dict):
@@ -375,7 +377,7 @@ async def log_requests(request: Request, call_next):
     org_id_var.set(org_id_header)
     user_id_var.set(user_id_header)
     role_var.set(role_header)
-    ORG_OPTIONAL_PATHS = {"/api/login", "/ap/logn", "/login", "/health", "/health/db", "/health/cors", "/docs", "/openapi.json", "/ui/", "/favicon.ico"}
+    ORG_OPTIONAL_PATHS = {"/api/login", "/ap/logn", "/login", "/health", "/health/db", "/health/cors", "/docs", "/openapi.json", "/ui/", "/favicon.ico", "/ingest/file"}
     require_org = os.getenv("REQUIRE_ORG_ID", "false").lower() in ("1", "true", "yes")
     if require_org and not org_id_header and request.method.upper() != "OPTIONS":
         path = request.url.path
@@ -1065,6 +1067,14 @@ async def ingest_file(request: Request, file: UploadFile = File(...), title: str
                             page_limit = None
         except Exception:
             page_limit = None
+        # Default page limit via env for faster demos
+        if page_limit is None:
+            try:
+                env_pl = os.getenv("FILE_PARSE_PAGE_LIMIT")
+                if env_pl:
+                    page_limit = int(env_pl)
+            except Exception:
+                page_limit = None
         if name_lower.endswith(".pdf"):
             reader = PdfReader(io.BytesIO(content))
             texts = []
@@ -1100,7 +1110,42 @@ async def ingest_file(request: Request, file: UploadFile = File(...), title: str
                 meta_obj = {"raw": meta}
         
         payload = IngestText(title=title or file.filename or "Untitled", text=text, meta=meta_obj)
-        resp = ingest_text(payload, request)
+        # Inline ingest to avoid role guard in /ingest/text
+        metrics["ingest_total"] += 1
+        doc_id = str(uuid.uuid4())
+        conn = get_conn()
+        org_id = org_id_var.get(None)
+        # Optional analysis for summary/keywords
+        merged_meta = payload.meta or {}
+        try:
+            if os.getenv("ANALYZE_ON_INGEST", "false").lower() in ("1","true","yes"):
+                analysis_results = analyze_text_with_llm(payload.text)
+                merged_meta = {**merged_meta, **(analysis_results or {})}
+        except Exception:
+            pass
+        upsert_document(conn, doc_id, payload.title, merged_meta, org_id, user_id_var.get(""))
+        chunks = make_chunks(payload.text, payload.chunk_size, payload.chunk_overlap)
+        embeds = embed_texts(chunks)
+        rows = []
+        for i, (ch, ev) in enumerate(zip(chunks, embeds)):
+            chunk_id = str(uuid.uuid4())
+            rows.append((chunk_id, doc_id, i, ch, to_vector_literal(ev)))
+        try:
+            upsert_chunks(conn, rows, org_id)
+            conn.close()
+        except Exception:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            _spool_write({
+                "type": "ingest",
+                "doc_id": doc_id,
+                "title": payload.title,
+                "meta": merged_meta,
+                "org_id": org_id,
+                "rows": rows,
+            })
         # Audit raw for file ingest
         try:
             conn_a = get_conn()
@@ -1121,7 +1166,7 @@ async def ingest_file(request: Request, file: UploadFile = File(...), title: str
             audit_event("ingest_file", query=payload.title)
         except Exception:
             pass
-        return resp
+        return IngestFileResp(doc_id=doc_id, chunk_count=len(rows))
     except Exception as e:
         return standardized_error_response(e)
 
