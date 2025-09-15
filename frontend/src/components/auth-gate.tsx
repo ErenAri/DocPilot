@@ -11,17 +11,19 @@ export default function AuthGate({ children }: Props) {
 
   useEffect(() => {
     try {
-      // In production (cookie auth), do not gate by localStorage token.
+      // In production (cookie auth), allow access and let server enforce.
       if (process.env.NODE_ENV === "production") return;
 
       const token = typeof window !== "undefined" ? localStorage.getItem("docpilot_token") : null;
       const isLogin = pathname === "/login";
       // Public paths (extend if needed)
       const isPublic = isLogin || pathname?.startsWith("/api") || pathname === "/favicon.ico";
-      if (!token && !isPublic) {
+      // Treat string "cookie" as logged-in via httpOnly cookie
+      const hasAuth = !!token && token !== "";
+      if (!hasAuth && !isPublic) {
         router.replace("/login");
       }
-      if (token && isLogin) {
+      if (hasAuth && isLogin) {
         router.replace("/ask");
       }
     } catch (_) {

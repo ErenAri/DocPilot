@@ -54,8 +54,9 @@ export default function LoginPage() {
             let data: any = {};
             try { data = await res.json(); } catch {}
             // Support both cookie-mode (no token) and dev token mode
-            if (process.env.NODE_ENV !== "production" && data && typeof data.token === "string" && data.token) {
-              localStorage.setItem("docpilot_token", data.token);
+            if (process.env.NODE_ENV !== "production") {
+              const token = (data && typeof data.token === "string" && data.token) ? data.token : "cookie";
+              try { localStorage.setItem("docpilot_token", token); } catch {}
             }
             // After login, go to ingest (home) as requested
             window.location.href = "/";
