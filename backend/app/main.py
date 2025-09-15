@@ -30,7 +30,10 @@ except ImportError:
             return self
         def __exit__(self, *args):
             pass
-    trace = DummyTracer()
+    class DummyTrace:
+        def get_tracer(self, name):
+            return DummyTracer()
+    trace = DummyTrace()
 from .schemas import IngestText, IngestFileResp, QueryReq, QueryResp, Passage, AnswerResp
 from .chunk import make_chunks
 from .embeddings import embed_texts, to_vector_literal, score_pairs, redact_pii
@@ -95,7 +98,7 @@ if otel_endpoint and OTEL_AVAILABLE:
 if OTEL_AVAILABLE:
     tracer = trace.get_tracer("docpilot")
 else:
-    tracer = trace  # Use the dummy tracer
+    tracer = trace.get_tracer("docpilot")  # Use the dummy tracer
 
 # --- Auth helpers ---
 def _extract_jwt(request: Request) -> Optional[str]:
