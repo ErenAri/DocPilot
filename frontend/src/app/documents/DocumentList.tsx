@@ -62,7 +62,7 @@ export function DocumentList({ docs, loading, hasMore, loadMorePending, onLoadMo
       {!loading && filtered.map(d => {
         const entries = Object.entries(d.meta || {}).slice(0, 3);
         return (
-          <button
+          <div
             key={d.id}
             role="listitem"
             onClick={(e) => {
@@ -109,7 +109,7 @@ export function DocumentList({ docs, loading, hasMore, loadMorePending, onLoadMo
                 ))}
               </div>
             )}
-          </button>
+          </div>
         );
       })}
       {!loading && hasMore && (
