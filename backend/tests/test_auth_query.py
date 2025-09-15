@@ -22,9 +22,9 @@ def setup_app_monkeypatch(monkeypatch):
     monkeypatch.setattr(app_mod, "insert_analytics_event", lambda conn, row: None)
     monkeypatch.setattr(app_mod, "embed_texts", lambda texts: [[0.0, 0.0, 0.0]])
     monkeypatch.setattr(app_mod, "to_vector_literal", lambda vec: "[]")
-    monkeypatch.setattr(app_mod, "knn_search", lambda conn, vec, top_k, fc, org=None: [])
-    monkeypatch.setattr(app_mod, "hybrid_search", lambda conn, vec, kw, top_k, fc, org=None: [])
-    monkeypatch.setattr(app_mod, "hybrid_fusion_search", lambda conn, vec, kw, top_k, fc, org=None: [])
+    monkeypatch.setattr(app_mod, "knn_search", lambda conn, vec, top_k, fc, org=None, doc_id=None: [])
+    monkeypatch.setattr(app_mod, "hybrid_search", lambda conn, vec, kw, top_k, fc, org=None, doc_id=None: [])
+    monkeypatch.setattr(app_mod, "hybrid_fusion_search", lambda conn, vec, kw, top_k, fc, org=None, doc_id=None: [])
 
     return app_mod
 
