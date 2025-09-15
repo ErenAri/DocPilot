@@ -177,6 +177,7 @@ export function UploadCard() {
         <div
           onDragOver={(e) => e.preventDefault()}
           onDrop={onDrop}
+          onClick={() => fileInputRef.current?.click()}
           className="rounded-xl border border-dashed border-white/20 bg-white/5 hover:bg-white/10 transition p-6 text-center"
         >
           <div className="flex flex-col items-center gap-2">
@@ -193,11 +194,12 @@ export function UploadCard() {
                 if (arr.length === 0) return;
                 addToQueue(arr);
                 await new Promise<void>((r) => requestAnimationFrame(() => r()));
+                try { e.currentTarget.value = ""; } catch {}
               }}
             />
             <Button
               type="button"
-              onClick={() => requestAnimationFrame(() => fileInputRef.current?.click())}
+              onClick={() => fileInputRef.current?.click()}
               className="bg-white/10 hover:bg-white/15"
             >
               <span className="inline-flex items-center gap-2"><FolderOpen className="w-4 h-4" /> Choose File</span>
