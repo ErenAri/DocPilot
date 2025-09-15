@@ -11,6 +11,7 @@ import DocumentList from "./DocumentList";
 import DocumentViewer from "./DocumentViewer";
 import AnalysisPanel from "./AnalysisPanel";
 import QAPanel from "./QAPanel";
+import { Download } from "lucide-react";
 
 export default function DocumentsPage() {
   const LIMIT = 50;
@@ -148,6 +149,24 @@ export default function DocumentsPage() {
     a.download = 'bulk_analysis.csv';
     a.click();
     URL.revokeObjectURL(url);
+  }
+
+  function downloadSelected() {
+    try {
+      if (!selectedDoc) return;
+      const text = (chunks || []).map((c) => c.text || "").join("\n\n");
+      const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      const base = String(selectedDoc.title || selectedDoc.id || "document").replace(/[\\/:*?"<>|]+/g, "_").slice(0, 64);
+      a.href = url;
+      a.download = `${base}.txt`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      console.error(e);
+      toastError("Download failed");
+    }
   }
 
   useEffect(() => {
@@ -470,9 +489,14 @@ export default function DocumentsPage() {
                 )}
               </CardTitle>
               {selectedDoc && (
-                <Button onClick={runAnalysis} disabled={analyzing} className="h-9">
-                  {analyzing ? "Analyzing…" : "Analyze"}
-                </Button>
+                <div className="flex items-center gap-2">
+                  <Button onClick={downloadSelected} disabled={loadingChunks || (chunks.length === 0)} variant="outline" className="h-9">
+                    <span className="inline-flex items-center gap-2"><Download className="w-4 h-4" /> Download</span>
+                  </Button>
+                  <Button onClick={runAnalysis} disabled={analyzing} className="h-9">
+                    {analyzing ? "Analyzing…" : "Analyze"}
+                  </Button>
+                </div>
               )}
             </div>
           </CardHeader>

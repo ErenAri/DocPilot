@@ -177,7 +177,6 @@ export function UploadCard() {
         <div
           onDragOver={(e) => e.preventDefault()}
           onDrop={onDrop}
-          onClick={() => fileInputRef.current?.click()}
           className="rounded-xl border border-dashed border-white/20 bg-white/5 hover:bg-white/10 transition p-6 text-center"
         >
           <div className="flex flex-col items-center gap-2">
