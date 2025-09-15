@@ -13,11 +13,42 @@ assertEnv();
 const API = API_BASE as string;
 const ORG_ID = ORG as string;
 
+// Ensure cookies (JWT auth) are sent on cross-origin requests
+const WITH_CREDENTIALS: RequestInit = { credentials: 'include' };
+
+// Lightweight auth token handling for local dev (Bearer fallback when cookie is not sent)
+let _authToken: string | null = null;
+function getToken(): string | null {
+  if (_authToken) return _authToken;
+  if (typeof window !== 'undefined') {
+    try { _authToken = window.localStorage.getItem('docpilot_token'); } catch {}
+  }
+  return _authToken;
+}
+export function setAuthToken(token: string | null) {
+  _authToken = token;
+  if (typeof window !== 'undefined') {
+    try {
+      if (token) window.localStorage.setItem('docpilot_token', token);
+      else window.localStorage.removeItem('docpilot_token');
+    } catch {}
+  }
+}
+
+export function apiFetch(path: string, init: RequestInit = {}): Promise<Response> {
+  const headers = new Headers((init.headers as HeadersInit) || {});
+  const t = getToken();
+  if (t && !headers.has('Authorization')) headers.set('Authorization', `Bearer ${t}`);
+  return fetch(`${API}${path}`, { ...WITH_CREDENTIALS, ...init, headers });
+}
+
 export function H(json: boolean = true): Headers {
   const h = new Headers();
   if (json) h.set("Content-Type", "application/json");
   h.set("X-Org-Id", ORG_ID);
   h.set("X-Role", ROLE);
+  const t = getToken();
+  if (t) h.set('Authorization', `Bearer ${t}`);
   return h;
 }
 
@@ -58,25 +89,25 @@ export async function withRetry<T>(fn: () => Promise<T>, opts: { retries?: numbe
 
 export async function listDocuments(limit: number = 50, offset: number = 0): Promise<{ items: DocumentInfo[]; total: number }> {
   const url = `${API}/documents?limit=${encodeURIComponent(limit)}&offset=${encodeURIComponent(offset)}`;
-  const r = await withRetry(() => fetch(url, { method: "GET", headers: H(), cache: "no-store" }));
+  const r = await withRetry(() => fetch(url, { method: "GET", headers: H(), cache: "no-store", ...WITH_CREDENTIALS }));
   if (!r.ok) throw new Error(await parseError(r));
   return r.json();
 }
 
 export async function getDocument(docId: string): Promise<{ chunks: Chunk[] }> {
-  const r = await withRetry(() => fetch(`${API}/documents/${encodeURIComponent(docId)}`, { method: "GET", headers: H(), cache: "no-store" }));
+  const r = await withRetry(() => fetch(`${API}/documents/${encodeURIComponent(docId)}`, { method: "GET", headers: H(), cache: "no-store", ...WITH_CREDENTIALS }));
   if (!r.ok) throw new Error(await parseError(r));
   return r.json();
 }
 
 export async function analyzeDoc(docId: string): Promise<AnalyzeResult> {
-  const r = await withRetry(() => fetch(`${API}/analyze/doc`, { method: "POST", headers: H(), body: JSON.stringify({ doc_id: docId }) }));
+  const r = await withRetry(() => fetch(`${API}/analyze/doc`, { method: "POST", headers: H(), body: JSON.stringify({ doc_id: docId }), ...WITH_CREDENTIALS }));
   if (!r.ok) throw new Error(await parseError(r));
   return r.json();
 }
 
 export async function ask(query: string, keyword?: string): Promise<AnswerResult> {
-  const r = await withRetry(() => fetch(`${API}/answer`, { method: "POST", headers: H(), body: JSON.stringify({ query, keyword }) }));
+  const r = await withRetry(() => fetch(`${API}/answer`, { method: "POST", headers: H(), body: JSON.stringify({ query, keyword }), ...WITH_CREDENTIALS }));
   if (!r.ok) throw new Error(await parseError(r));
   return r.json();
 }
@@ -85,9 +116,27 @@ export async function ingestFile(file: File, meta?: unknown): Promise<Record<str
   const form = new FormData();
   form.append("file", file);
   if (meta !== undefined) form.append("meta", JSON.stringify(meta));
-  const r = await withRetry(() => fetch(`${API}/ingest/file`, { method: "POST", headers: H(false), body: form }));
+  let r = await withRetry(() => fetch(`${API}/ingest/file`, { method: "POST", headers: H(false), body: form, ...WITH_CREDENTIALS }));
+  if (r.status === 401 || r.status === 403) {
+    const demoUser = process.env.NEXT_PUBLIC_DEMO_USER;
+    const demoPass = process.env.NEXT_PUBLIC_DEMO_PASS;
+    if (demoUser && demoPass) {
+      try { await login(demoUser, demoPass); } catch {}
+      r = await fetch(`${API}/ingest/file`, { method: "POST", headers: H(false), body: form, ...WITH_CREDENTIALS });
+    }
+  }
   if (!r.ok) throw new Error(await parseError(r));
   return r.json();
+}
+
+export type LoginResp = { token?: string; user_id: string; username: string; org_id?: string | null };
+export async function login(username: string, password: string): Promise<LoginResp> {
+  const r = await apiFetch(`/ap/logn`, { method: 'POST', headers: H(), body: JSON.stringify({ username, password }) });
+  if (!r.ok) throw new Error(await parseError(r));
+  const data = await r.json();
+  // In local dev, backend may include token in body — persist as Bearer fallback
+  if (data?.token) setAuthToken(data.token);
+  return data as LoginResp;
 }
 
 
