@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { DocumentInfo } from "../../../lib/actions";
 import { deleteDocument } from "../../../lib/actions";
 
@@ -19,7 +19,13 @@ export interface DocumentListProps {
 
 export function DocumentList({ docs, loading, hasMore, loadMorePending, onLoadMore, filtered, selectedId, bulkMode, selectedIds, toggleSelect, onSelect }: DocumentListProps) {
   const listRef = useRef<HTMLDivElement | null>(null);
-  const isAdmin = typeof window !== "undefined" ? (localStorage.getItem("docpilot_role") || "").toLowerCase() === "admin" : false;
+  const [isAdmin, setIsAdmin] = useState<boolean>(false);
+  useEffect(() => {
+    try {
+      const role = (typeof window !== "undefined" ? localStorage.getItem("docpilot_role") : "") || "";
+      setIsAdmin(role.toLowerCase() === "admin");
+    } catch {}
+  }, []);
 
   useEffect(() => {
     const el = listRef.current;

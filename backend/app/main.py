@@ -2631,15 +2631,12 @@ def get_document_content(doc_id: str):
                     parts = make_chunks(raw_text, 800, 100)
                 except Exception:
                     parts = [raw_text]
-                chunks = [
-                    DocumentChunk(
-                        id=f"virt-{i}",
-                        doc_id=str(doc_id),
-                        ord=i,
-                        text=str(t)
-                    ) for i, t in enumerate(parts)
-                ]
-                return DocumentContentResp(chunks=chunks)
+                # Limit to first 2000 chars to avoid huge payloads
+                joined = "\n\n".join(parts)
+                if len(joined) > 2000:
+                    joined = joined[:2000]
+                virt = [DocumentChunk(id="virt-0", doc_id=str(doc_id), ord=0, text=joined)]
+                return DocumentContentResp(chunks=virt)
             # Gracefully return empty list instead of 404
             return DocumentContentResp(chunks=[])
 
