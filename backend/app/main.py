@@ -1012,7 +1012,7 @@ def ingest_text(payload: IngestText, request: Request):
 @app.post("/ingest/file", response_model=IngestFileResp)
 async def ingest_file(request: Request, file: UploadFile = File(...), title: str = Form(None), meta: str = Form(None)):
     try:
-        if not is_allowed(["editor", "admin"]):
+        if not is_allowed(["viewer", "editor", "admin"]):
             return JSONResponse(status_code=403, content={"error": "forbidden"})
         log_with_request_id("Processing file ingestion", "info", filename=file.filename)
         content = await file.read()
