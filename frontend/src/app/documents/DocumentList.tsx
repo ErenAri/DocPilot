@@ -3,7 +3,6 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { DocumentInfo } from "../../../lib/actions";
 import { deleteDocument } from "../../../lib/actions";
 import { Trash } from "lucide-react";
-import { useState } from "react";
 
 export interface DocumentListProps {
   docs: DocumentInfo[];
@@ -48,6 +47,7 @@ export function DocumentList({ docs, loading, hasMore, loadMorePending, onLoadMo
   }
 
   return (
+    <>
     <div ref={listRef} className="max-h-[70vh] overflow-auto divide-y divide-white/10" role="list">
       {loading && (
         <div className="p-3 space-y-2">
@@ -147,6 +147,7 @@ export function DocumentList({ docs, loading, hasMore, loadMorePending, onLoadMo
         </div>
       </div>
     )}
+    </>
   );
 }
 
