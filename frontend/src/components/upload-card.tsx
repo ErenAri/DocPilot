@@ -246,12 +246,15 @@ export function UploadCard() {
           <Label htmlFor="rawtext" className="sr-only">Raw Text</Label>
           <Textarea id="rawtext" value={text} onChange={(e) => setText(e.target.value)} placeholder="Paste text..." rows={6} className="resize-y bg-white/5" />
         </details>
-        <div className="flex justify-end">
-          <Button onClick={uploadText} disabled={!text.trim() || isUploading} className="bg-gradient-to-r from-sky-500 to-cyan-500 hover:from-sky-400 hover:to-cyan-400">
-            {isUploading ? "Submitting..." : (
-              <span className="inline-flex items-center gap-2"><FileText className="w-4 h-4" /> Ingest Text</span>
-            )}
-          </Button>
+        <div className="flex justify-between items-center">
+          <div className="text-xs text-white/60">PDF uploads start automatically. Use this only for pasted text.</div>
+          { (text.trim().length > 0) && (
+            <Button onClick={uploadText} disabled={isUploading} className="bg-gradient-to-r from-sky-500 to-cyan-500 hover:from-sky-400 hover:to-cyan-400">
+              {isUploading ? "Submitting..." : (
+                <span className="inline-flex items-center gap-2"><FileText className="w-4 h-4" /> Ingest Raw Text</span>
+              )}
+            </Button>
+          )}
         </div>
       </CardContent>
     </Card>
