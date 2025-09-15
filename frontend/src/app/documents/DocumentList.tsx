@@ -2,6 +2,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { DocumentInfo } from "../../../lib/actions";
 import { deleteDocument } from "../../../lib/actions";
+import { Trash } from "lucide-react";
 
 export interface DocumentListProps {
   docs: DocumentInfo[];
@@ -84,18 +85,21 @@ export function DocumentList({ docs, loading, hasMore, loadMorePending, onLoadMo
                     type="button"
                     onClick={async (ev) => {
                       ev.stopPropagation();
-                      const ok = window.confirm("Bu belgeyi tamamen silmek üzeresiniz. Emin misiniz?");
+                      const ok = window.confirm("This will permanently delete the document. Are you sure?");
                       if (!ok) return;
                       const res = await deleteDocument(d.id);
                       if (!res.ok) {
-                        alert(`Silme başarısız: ${res.error}`);
+                        alert(`Delete failed: ${res.error}`);
                       } else {
                         window.location.reload();
                       }
                     }}
-                    className="text-xs px-2 py-1 rounded bg-red-500/20 border border-red-400/30 hover:bg-red-500/30"
+                    className="inline-flex items-center justify-center h-6 w-6 rounded bg-red-500/15 border border-red-400/30 hover:bg-red-500/25 text-red-300 hover:text-red-200"
                     title="Delete document"
-                  >Sil</button>
+                    aria-label="Delete document"
+                  >
+                    <Trash className="w-3.5 h-3.5" />
+                  </button>
                 )}
               </div>
             </div>
