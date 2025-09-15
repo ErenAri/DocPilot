@@ -378,7 +378,7 @@ async def log_requests(request: Request, call_next):
                 return await call_next(request)
             require_login = os.getenv("REQUIRE_LOGIN", "true").lower() in ("1","true","yes")
             path = request.url.path
-            public_prefixes = ("/api/login", "/ap/logn", "/health", "/health/db", "/metrics", "/ui/", "/favicon.ico", "/docs", "/openapi.json", "/documents")
+            public_prefixes = ("/api/login", "/ap/logn", "/health", "/health/db", "/metrics", "/ui/", "/favicon.ico", "/docs", "/openapi.json", "/documents", "/analyze/doc")
             if require_login and (not any(path.startswith(p) for p in public_prefixes)) and not isinstance(user_row, dict):
                 return JSONResponse(status_code=401, content={"error": "auth_required", "request_id": request_id})
         except Exception:
@@ -1935,6 +1935,9 @@ class AnalyzeDocBody(BaseModel):
 @app.post("/analyze/doc")
 def analyze_doc(body: AnalyzeDocBody):
     try:
+        # Allow viewer/editor/admin
+        if not is_allowed(["viewer", "analyst", "editor", "admin"]):
+            return JSONResponse(status_code=403, content={"error": "forbidden"})
         conn = get_conn()
         text = fetch_document_text(conn, body.doc_id)
         conn.close()
