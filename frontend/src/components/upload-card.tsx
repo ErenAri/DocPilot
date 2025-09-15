@@ -62,7 +62,7 @@ export function UploadCard() {
     const form = new FormData();
     form.append("file", item.file);
     form.append("title", title || item.file.name);
-    form.append("meta", JSON.stringify({ ocr, auto_split: autoSplit }));
+    form.append("meta", JSON.stringify({ ocr, auto_split: autoSplit, page_limit: 8 }));
     const res = await apiFetch(`/ingest/file`, { method: "POST", body: form, timeoutMs: 180000 });
     if (!res.ok) throw new Error(await res.text());
     return await res.json();

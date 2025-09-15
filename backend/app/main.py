@@ -1018,12 +1018,31 @@ async def ingest_file(request: Request, file: UploadFile = File(...), title: str
         content = await file.read()
         name_lower = (file.filename or "").lower()
         text_raw = ""
+        page_limit = None
+        try:
+            if isinstance(meta, str) and meta:
+                _m = json.loads(meta)
+                if isinstance(_m, dict) and _m.get("page_limit") is not None:
+                    page_limit = int(_m.get("page_limit"))
+        except Exception:
+            page_limit = None
         if name_lower.endswith(".pdf"):
             reader = PdfReader(io.BytesIO(content))
-            text_raw = "\n".join([p.extract_text() or "" for p in reader.pages])
+            texts = []
+            for i, p in enumerate(reader.pages):
+                if isinstance(page_limit, int) and page_limit > 0 and i >= page_limit:
+                    break
+                try:
+                    texts.append(p.extract_text() or "")
+                except Exception:
+                    texts.append("")
+            text_raw = "\n".join(texts)
         elif name_lower.endswith(".docx"):
             doc = DocxDocument(io.BytesIO(content))
-            text_raw = "\n".join([p.text or "" for p in doc.paragraphs])
+            paras = [p.text or "" for p in doc.paragraphs]
+            if isinstance(page_limit, int) and page_limit > 0:
+                paras = paras[: page_limit * 50]
+            text_raw = "\n".join(paras)
         elif name_lower.endswith(".txt"):
             try:
                 text_raw = content.decode("utf-8", errors="ignore")
