@@ -4,8 +4,8 @@ import { useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { listDocuments, getDocument, analyzeDoc, ask } from "@/lib/actions";
-import type { DocumentInfo, AnalyzeResult, Chunk, AnswerResult } from "@/lib/actions";
+import { listDocuments, getDocument, analyzeDoc, ask } from "../../../lib/actions";
+import type { DocumentInfo, AnalyzeResult, Chunk, AnswerResult } from "../../../lib/actions";
 import QAPanel from "../documents/QAPanel";
 import { toastError, toastInfo } from "@/lib/toast";
 
