@@ -278,13 +278,13 @@ async def _compact_loop():
 # CORS: strict configuration from env
 _cors_origins = [o.strip() for o in (os.getenv("CORS_ALLOW_ORIGINS", "http://localhost:3000").split(",")) if o.strip()]
 _cors_methods = ["GET", "POST", "PUT", "DELETE", "OPTIONS"]
-_cors_headers = ["Authorization", "Content-Type", "X-Org-Id"]
+_cors_headers = ["Authorization", "Content-Type", "X-Org-Id", "X-Role", "X-Api-Key"]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_cors_origins,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=_cors_methods,
+    allow_headers=_cors_headers,
 )
 
 # Build a path to the 'frontend' directory relative to this script's location

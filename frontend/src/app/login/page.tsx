@@ -47,17 +47,20 @@ export default function LoginPage() {
               body: JSON.stringify({ username, password }),
             });
             if (!res.ok) {
-              alert("Login failed");
+              const msg = await res.text().catch(() => "");
+              alert(`Login failed${msg ? `: ${msg}` : ""}`);
               return;
             }
-            const data = await res.json();
-            if (process.env.NODE_ENV !== "production") {
+            let data: any = {};
+            try { data = await res.json(); } catch {}
+            // Support both cookie-mode (no token) and dev token mode
+            if (process.env.NODE_ENV !== "production" && data && typeof data.token === "string" && data.token) {
               localStorage.setItem("docpilot_token", data.token);
             }
             // After login, go to ingest (home) as requested
             window.location.href = "/";
           } catch (err) {
-            alert("Login error");
+            alert("Login error: network/CORS");
           }
         }}
       >
