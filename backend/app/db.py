@@ -390,7 +390,7 @@ def fetch_chunks_by_ids(conn, ids):
     cur.close()
     return rows
 
-def knn_search(conn, vector_literal, top_k, filter_category=None, org_id=None):
+def knn_search(conn, vector_literal, top_k, filter_category=None, org_id=None, doc_id=None):
     cur = conn.cursor(dictionary=True)
     if filter_category:
         q = """
@@ -398,7 +398,7 @@ def knn_search(conn, vector_literal, top_k, filter_category=None, org_id=None):
           SELECT id, doc_id, ord, text,
                  VEC_COSINE_DISTANCE(embedding, %s) AS dist
           FROM chunks
-          {chunk_org}
+          {chunk_where}
           ORDER BY dist ASC
           LIMIT %s
         )
@@ -411,12 +411,21 @@ def knn_search(conn, vector_literal, top_k, filter_category=None, org_id=None):
         LIMIT %s
         """
         q = q.format(
-            chunk_org=("WHERE org_id = %s" if org_id else ""),
+            chunk_where=(
+                "WHERE org_id = %s AND doc_id = %s" if (org_id and doc_id) else
+                "WHERE org_id = %s" if org_id else
+                "WHERE doc_id = %s" if doc_id else
+                ""
+            ),
             doc_org=("AND d.org_id = %s" if org_id else ""),
         )
         params = [vector_literal]
-        if org_id:
+        if org_id and doc_id:
+            params.extend([org_id, doc_id])
+        elif org_id:
             params.append(org_id)
+        elif doc_id:
+            params.append(doc_id)
         params.append(top_k * 5)
         params.append(filter_category)
         if org_id:
@@ -428,14 +437,25 @@ def knn_search(conn, vector_literal, top_k, filter_category=None, org_id=None):
         SELECT id, doc_id, ord, text,
                VEC_COSINE_DISTANCE(embedding, %s) AS dist
         FROM chunks
-        {chunk_org}
+        {chunk_where}
         ORDER BY dist ASC
         LIMIT %s
         """
-        q = q.format(chunk_org=("WHERE org_id = %s" if org_id else ""))
+        q = q.format(
+            chunk_where=(
+                "WHERE org_id = %s AND doc_id = %s" if (org_id and doc_id) else
+                "WHERE org_id = %s" if org_id else
+                "WHERE doc_id = %s" if doc_id else
+                ""
+            )
+        )
         params = [vector_literal]
-        if org_id:
+        if org_id and doc_id:
+            params.extend([org_id, doc_id])
+        elif org_id:
             params.append(org_id)
+        elif doc_id:
+            params.append(doc_id)
         params.append(top_k)
         cur.execute(q, tuple(params))
     rows = cur.fetchall()
@@ -443,7 +463,7 @@ def knn_search(conn, vector_literal, top_k, filter_category=None, org_id=None):
     return rows
 
 # --- Optional/compat fallbacks ---
-def hybrid_search(conn, vector_literal, keyword, top_k, filter_category=None, org_id=None):
+def hybrid_search(conn, vector_literal, keyword, top_k, filter_category=None, org_id=None, doc_id=None):
     """Hybrid search combining BM25/FULLTEXT with vector distance.
 
     Strategy:
@@ -463,6 +483,7 @@ def hybrid_search(conn, vector_literal, keyword, top_k, filter_category=None, or
               WHERE MATCH(c.text) AGAINST (%s IN BOOLEAN MODE)
                 AND JSON_UNQUOTE(JSON_EXTRACT(d.meta,'$.category')) = %s
                 {doc_org}
+                {doc_id_and}
               LIMIT %s
             )
             SELECT id, doc_id, ord, text,
@@ -475,11 +496,14 @@ def hybrid_search(conn, vector_literal, keyword, top_k, filter_category=None, or
             """
             q = q.format(
                 doc_org=("AND d.org_id = %s" if org_id else ""),
+                doc_id_and=("AND c.doc_id = %s" if doc_id else ""),
                 chunk_org_and=("AND org_id = %s" if org_id else ""),
             )
             params = [keyword, filter_category]
             if org_id:
                 params.append(org_id)
+            if doc_id:
+                params.append(doc_id)
             params.append(top_k * 10)
             params.append(vector_literal)
             if org_id:
@@ -493,6 +517,7 @@ def hybrid_search(conn, vector_literal, keyword, top_k, filter_category=None, or
               FROM chunks
               WHERE MATCH(text) AGAINST (%s IN BOOLEAN MODE)
               {chunk_org_where}
+              {doc_id_and}
               LIMIT %s
             )
             SELECT id, doc_id, ord, text,
@@ -505,11 +530,14 @@ def hybrid_search(conn, vector_literal, keyword, top_k, filter_category=None, or
             """
             q = q.format(
                 chunk_org_where=("AND org_id = %s" if org_id else ""),
+                doc_id_and=("AND doc_id = %s" if doc_id else ""),
                 chunk_org_and=("AND org_id = %s" if org_id else ""),
             )
             params = [keyword]
             if org_id:
                 params.append(org_id)
+            if doc_id:
+                params.append(doc_id)
             params.append(top_k * 10)
             params.append(vector_literal)
             if org_id:
@@ -585,7 +613,7 @@ def hybrid_search(conn, vector_literal, keyword, top_k, filter_category=None, or
     cur.close()
     return rows
 
-def hybrid_fusion_search(conn, vector_literal, keyword, top_k, filter_category=None, org_id=None):
+def hybrid_fusion_search(conn, vector_literal, keyword, top_k, filter_category=None, org_id=None, doc_id=None):
     """Hybrid retrieval with fusion (RRF) combining FULLTEXT and VECTOR candidates.
 
     Strategy:
@@ -610,15 +638,26 @@ def hybrid_fusion_search(conn, vector_literal, keyword, top_k, filter_category=N
                 "MATCH(c.text) AGAINST (%s) AS ft_score "
                 "FROM chunks c JOIN documents d ON d.id = c.doc_id "
                 "WHERE (d.org_id <=> %s OR %s IS NULL) AND JSON_UNQUOTE(JSON_EXTRACT(d.meta,'$.category')) = %s "
+                + (" AND c.doc_id = %s" if doc_id else "") +
                 "ORDER BY ft_score DESC LIMIT %s"
             )
-            cur.execute(q, (keyword, org_id, org_id, filter_category, ft_limit))
+            params = [keyword, org_id, org_id, filter_category]
+            if doc_id:
+                params.append(doc_id)
+            params.append(ft_limit)
+            cur.execute(q, tuple(params))
         else:
             q = (
                 "SELECT id, doc_id, ord, text, MATCH(text) AGAINST (%s) AS ft_score "
-                "FROM chunks WHERE (org_id <=> %s OR %s IS NULL) ORDER BY ft_score DESC LIMIT %s"
+                "FROM chunks WHERE (org_id <=> %s OR %s IS NULL) "
+                + (" AND doc_id = %s" if doc_id else "") +
+                " ORDER BY ft_score DESC LIMIT %s"
             )
-            cur.execute(q, (keyword, org_id, org_id, ft_limit))
+            params = [keyword, org_id, org_id]
+            if doc_id:
+                params.append(doc_id)
+            params.append(ft_limit)
+            cur.execute(q, tuple(params))
         ft_rows = cur.fetchall() or []
         # Drop rows with NULL ft_score
         ft_rows = [r for r in ft_rows if r.get("ft_score") is not None]
@@ -632,23 +671,33 @@ def hybrid_fusion_search(conn, vector_literal, keyword, top_k, filter_category=N
                     "(LENGTH(LOWER(c.text)) - LENGTH(REPLACE(LOWER(c.text), LOWER(%s), ''))) / NULLIF(LENGTH(%s),0) AS ft_score "
                     "FROM chunks c JOIN documents d ON d.id = c.doc_id "
                     "WHERE c.text LIKE %s AND (d.org_id <=> %s OR %s IS NULL) AND JSON_UNQUOTE(JSON_EXTRACT(d.meta,'$.category')) = %s "
+                    + (" AND c.doc_id = %s" if doc_id else "") +
                     "ORDER BY ft_score DESC LIMIT %s"
                 )
-                cur.execute(q, (keyword, keyword, like_kw, org_id, org_id, filter_category, ft_limit))
+                params = [keyword, keyword, like_kw, org_id, org_id, filter_category]
+                if doc_id:
+                    params.append(doc_id)
+                params.append(ft_limit)
+                cur.execute(q, tuple(params))
             else:
                 q = (
                     "SELECT id, doc_id, ord, text, "
                     "(LENGTH(LOWER(text)) - LENGTH(REPLACE(LOWER(text), LOWER(%s), ''))) / NULLIF(LENGTH(%s),0) AS ft_score "
                     "FROM chunks WHERE text LIKE %s AND (org_id <=> %s OR %s IS NULL) "
-                    "ORDER BY ft_score DESC LIMIT %s"
+                    + (" AND doc_id = %s" if doc_id else "") +
+                    " ORDER BY ft_score DESC LIMIT %s"
                 )
-                cur.execute(q, (keyword, keyword, like_kw, org_id, org_id, ft_limit))
+                params = [keyword, keyword, like_kw, org_id, org_id]
+                if doc_id:
+                    params.append(doc_id)
+                params.append(ft_limit)
+                cur.execute(q, tuple(params))
             ft_rows = cur.fetchall() or []
         except Exception:
             ft_rows = []
 
     # 2) VECTOR candidates
-    vec_rows = knn_search(conn, vector_literal, vec_limit, filter_category, org_id)
+    vec_rows = knn_search(conn, vector_literal, vec_limit, filter_category, org_id, doc_id)
     # 3) Build rank maps
     ft_rank: dict[str, int] = {}
     for idx, r in enumerate(ft_rows):

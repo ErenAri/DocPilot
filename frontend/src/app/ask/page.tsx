@@ -104,7 +104,7 @@ export default function AskPage() {
 
   const weaknesses = useMemo(() => {
     const risks = (analysis && (analysis as any).risks) || [] as Array<{ item: string; severity?: string }>;
-    return risks.map(r => `${r.item}${r.severity ? ` [${String(r.severity).toUpperCase()}]` : ""}`);
+    return risks.map((r: { item: string; severity?: string }) => `${r.item}${r.severity ? ` [${String(r.severity).toUpperCase()}]` : ""}`);
   }, [analysis]);
 
   const suggestions = useMemo(() => {
@@ -155,9 +155,6 @@ export default function AskPage() {
           <div className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-white/5 border border-white/10">
             <h1 className="text-xl md:text-2xl font-semibold tracking-tight">Ask Your Documents</h1>
           </div>
-          <Link href="/" className="inline-flex">
-            <Button className="h-9 bg-white/10 hover:bg-white/15">Back to Ingest</Button>
-          </Link>
         </div>
 
         <div className="grid md:grid-cols-2 gap-4">
@@ -226,7 +223,7 @@ export default function AskPage() {
                           <div className="text-xs font-semibold mb-1">Weaknesses</div>
                           {weaknesses.length === 0 ? <div className="text-xs text-white/60">—</div> : (
                             <ul className="text-xs list-disc pl-4 space-y-1">
-                              {weaknesses.map((s, i) => (<li key={i}>{s}</li>))}
+                              {weaknesses.map((s: any, i: any) => (<li key={i}>{s}</li>))}
                             </ul>
                           )}
                         </div>
@@ -243,18 +240,7 @@ export default function AskPage() {
                     )}
                   </div>
 
-                  <div className="space-y-2">
-                    <div className="text-sm font-semibold">Ask this document</div>
-                    <QAPanel
-                      askError={askError}
-                      askQ={askQ}
-                      onAskQChange={setAskQ}
-                      asking={asking}
-                      onAsk={runAsk}
-                      onExportPdf={() => { /* optional on this page */ }}
-                      answer={answer}
-                    />
-                  </div>
+                  
                 </>
               )}
             </CardContent>

@@ -345,6 +345,11 @@ async def log_requests(request: Request, call_next):
     client_key = request.headers.get("X-Api-Key")
     path = request.url.path
     EXEMPT_APIKEY_PREFIXES = ("/ui/", "/favicon.ico", "/docs", "/openapi.json", "/documents", "/ingest/file")
+    try:
+        if os.getenv("ALLOW_PUBLIC_QA", "false").lower() in ("1","true","yes"):
+            EXEMPT_APIKEY_PREFIXES = EXEMPT_APIKEY_PREFIXES + ("/answer", "/answer/stream", "/query")
+    except Exception:
+        pass
     if request.method.upper() != "OPTIONS":
         if not any(path.startswith(p) for p in EXEMPT_APIKEY_PREFIXES):
             if api_key_required and client_key != api_key_required and not isinstance(user_row, dict):
@@ -404,6 +409,11 @@ async def log_requests(request: Request, call_next):
             require_login = os.getenv("REQUIRE_LOGIN", "true").lower() in ("1","true","yes")
             path = request.url.path
             public_prefixes = ("/api/login", "/ap/logn", "/health", "/health/db", "/metrics", "/ui/", "/favicon.ico", "/docs", "/openapi.json", "/documents", "/analyze/doc", "/ingest/file")
+            try:
+                if os.getenv("ALLOW_PUBLIC_QA", "false").lower() in ("1","true","yes"):
+                    public_prefixes = public_prefixes + ("/answer", "/answer/stream", "/query")
+            except Exception:
+                pass
             if require_login and (not any(path.startswith(p) for p in public_prefixes)) and not isinstance(user_row, dict):
                 return JSONResponse(status_code=401, content={"error": "auth_required", "request_id": request_id})
         except Exception:
@@ -759,7 +769,7 @@ async def dashboard_metrics():
 app.include_router(analytics_router)
 
 class AnswerReq(QueryReq):
-    template: str | None = "contract_response"
+    template: str | None = None
 
 def rerank_passages(query: str, passages: List[Dict]) -> List[Dict]:
     """Apply reranking to passages"""
@@ -797,9 +807,9 @@ def answer(payload: AnswerReq, request: Request):
             with tracer.start_as_current_span("db.search.hybrid"):
                 use_fusion = os.getenv("HYBRID_FUSION", "true").lower() in ("1","true","yes")
                 if use_fusion:
-                    rows = cast(List[Dict[str, Any]], hybrid_fusion_search(conn, vector_literal, payload.keyword, payload.top_k or 10, payload.filter_category, org_id_var.get("") or None))
+                    rows = cast(List[Dict[str, Any]], hybrid_fusion_search(conn, vector_literal, payload.keyword, payload.top_k or 10, payload.filter_category, org_id_var.get("") or None, getattr(payload,'doc_id', None)))
                 else:
-                    rows = cast(List[Dict[str, Any]], hybrid_search(conn, vector_literal, payload.keyword, payload.top_k or 10, payload.filter_category, org_id_var.get("") or None))
+                    rows = cast(List[Dict[str, Any]], hybrid_search(conn, vector_literal, payload.keyword, payload.top_k or 10, payload.filter_category, org_id_var.get("") or None, getattr(payload,'doc_id', None)))
             log_with_request_id("Used hybrid search", "debug", keyword=payload.keyword)
             try:
                 conn3 = get_conn()
@@ -824,7 +834,7 @@ def answer(payload: AnswerReq, request: Request):
                 pass
         else:
             with tracer.start_as_current_span("db.search.knn"):
-                rows = cast(List[Dict[str, Any]], knn_search(conn, vector_literal, payload.top_k or 10, payload.filter_category, org_id_var.get("") or None))
+                rows = cast(List[Dict[str, Any]], knn_search(conn, vector_literal, payload.top_k or 10, payload.filter_category, org_id_var.get("") or None, getattr(payload,'doc_id', None)))
             log_with_request_id("Used vector search", "debug")
         
         conn.close(); step['search_ms'] = int((time.time() - t1) * 1000)
@@ -855,6 +865,9 @@ def answer(payload: AnswerReq, request: Request):
         model = os.getenv("PRIMARY_MODEL","gpt-4o")
         t2 = time.time()
         with tracer.start_as_current_span("llm.answer"):
+        # choose answer mode if provided
+            if getattr(payload, 'answer_mode', None) == 'concise':
+                os.environ['SIMPLE_ANSWER'] = 'true'
             content, is_low_evidence, confidence = answer_with_evidence(payload.query, passages, model)
         step['llm_ms'] = int((time.time() - t2) * 1000)
         latency_ms = int((time.time() - t0) * 1000)
@@ -936,12 +949,22 @@ def answer_stream(payload: AnswerReq, request: Request):
         rows = rerank_passages(payload.query, rows)
         rows = rows[: (payload.top_k or 10)]
         passages = [{"id": r["id"], "doc_id": r["doc_id"], "ord": r["ord"], "text": r["text"], "dist": float(r["dist"]) } for r in rows]
-        # Build prompt inline (mirror answer.py)
+        # Build prompt inline; use simple paragraph mode when enabled
         from .answer import SYSTEM_PROMPT, format_evidence, assess_evidence_sufficiency
         is_low = assess_evidence_sufficiency(passages)
-        system_prompt = ("Evidence may be insufficient; produce a cautious draft and explicitly mark 'Insufficient evidence' where needed.\n\n" + SYSTEM_PROMPT) if is_low else SYSTEM_PROMPT
+        simple_mode = os.getenv("SIMPLE_ANSWER", "true").lower() in ("1","true","yes")
         ev = format_evidence(passages)
-        user = f"Query: {payload.query}\n\nEvidence Passages:\n{ev}\n\nProduce:\n1) Executive Summary (3 bullets)\n2) Risk Checklist (table: Item | Severity | Evidence #)\n3) Response Draft (numbered), each point with [Evidence #]."
+        if simple_mode:
+            system_prompt = (
+                "You are a concise, accurate assistant. Answer the question using only the provided evidence. "
+                "If evidence is insufficient, say 'Insufficient evidence.' Output a single short paragraph."
+            )
+            if is_low:
+                system_prompt = "Evidence may be insufficient. Be cautious. " + system_prompt
+            user = f"Question: {payload.query}\n\nEvidence:\n{ev}\n\nWrite one concise paragraph answer only."
+        else:
+            system_prompt = ("Evidence may be insufficient; produce a cautious draft and explicitly mark 'Insufficient evidence' where needed.\n\n" + SYSTEM_PROMPT) if is_low else SYSTEM_PROMPT
+            user = f"Query: {payload.query}\n\nEvidence Passages:\n{ev}\n\nProduce:\n1) Executive Summary (3 bullets)\n2) Risk Checklist (table: Item | Severity | Evidence #)\n3) Response Draft (numbered), each point with [Evidence #]."
         client = get_client()
         model = os.getenv("PRIMARY_MODEL","gpt-4o")
         def gen():
@@ -1189,14 +1212,14 @@ def query(payload: QueryReq, request: Request):
             with tracer.start_as_current_span("db.search.hybrid"):
                 use_fusion = os.getenv("HYBRID_FUSION", "true").lower() in ("1","true","yes")
                 if use_fusion:
-                    rows = cast(List[Dict[str, Any]], hybrid_fusion_search(conn, vector_literal, payload.keyword, payload.top_k, payload.filter_category, org_id_var.get("") or None))
+                    rows = cast(List[Dict[str, Any]], hybrid_fusion_search(conn, vector_literal, payload.keyword, payload.top_k, payload.filter_category, org_id_var.get("") or None, getattr(payload,'doc_id', None)))
                 else:
-                    rows = cast(List[Dict[str, Any]], hybrid_search(conn, vector_literal, payload.keyword, payload.top_k, payload.filter_category, org_id_var.get("") or None))
+                    rows = cast(List[Dict[str, Any]], hybrid_search(conn, vector_literal, payload.keyword, payload.top_k, payload.filter_category, org_id_var.get("") or None, getattr(payload,'doc_id', None)))
             log_with_request_id("Used hybrid search", "debug", keyword=payload.keyword)
         else:
             # Prefer TiFlash for large scans (optimizer hint)
             with tracer.start_as_current_span("db.search.knn"):
-                rows = cast(List[Dict[str, Any]], knn_search(conn, vector_literal, payload.top_k, payload.filter_category, org_id_var.get("") or None))
+                rows = cast(List[Dict[str, Any]], knn_search(conn, vector_literal, payload.top_k, payload.filter_category, org_id_var.get("") or None, getattr(payload,'doc_id', None)))
             log_with_request_id("Used vector search", "debug")
         
         conn.close(); step['search_ms'] = int((time.time() - t1) * 1000)
@@ -1925,14 +1948,15 @@ def api_login(body: LoginBody, request: Request):
         if cookie_samesite_choice in ("lax", "strict", "none"):
             cookie_samesite = cast(Literal['lax','strict','none'], cookie_samesite_choice)
         if use_cookie_auth:
-            # Include token in body for local development (localhost/http) so SPA can use Bearer auth
-            include_token = False
+            # Include token in body so SPA can fall back to Bearer auth when cookies aren't sent cross-origin.
+            include_token = True
             try:
-                host = (request.url.hostname or "").lower()
-                scheme = (request.url.scheme or "").lower()
-                include_token = host in ("localhost", "127.0.0.1") and scheme != "https"
+                # Allow override via env; default true for easier local dev across ports
+                env_flag = os.getenv("INCLUDE_TOKEN_IN_LOGIN")
+                if env_flag is not None:
+                    include_token = str(env_flag).lower() in ("1","true","yes")
             except Exception:
-                include_token = False
+                include_token = True
             payload = {"ok": True, "user_id": user_id_value or "", "username": username_value or body.username, "org_id": resolved_org}
             if include_token:
                 payload.update({"token": jwt_token})

@@ -1,6 +1,7 @@
 export const API_BASE = process.env.NEXT_PUBLIC_API_URL;
 const ORG = process.env.NEXT_PUBLIC_ORG_ID;
 const ROLE = process.env.NEXT_PUBLIC_ROLE || "viewer";
+const API_KEY = process.env.NEXT_PUBLIC_API_KEY;
 
 export function assertEnv(): void {
   if (!API_BASE) throw new Error("NEXT_PUBLIC_API_URL is required");
@@ -47,6 +48,7 @@ export function H(json: boolean = true): Headers {
   if (json) h.set("Content-Type", "application/json");
   h.set("X-Org-Id", ORG_ID);
   h.set("X-Role", ROLE);
+  if (API_KEY) h.set("X-Api-Key", API_KEY);
   const t = getToken();
   if (t) h.set('Authorization', `Bearer ${t}`);
   return h;
@@ -56,10 +58,11 @@ export type DocumentInfo = { id: string; title: string; created_at: string; meta
 export type Chunk = { id: string; ord: number; text: string; page?: number | null };
 export type AnalyzeResult = { doc_id: string; clauses: Record<string, boolean>; risks: { item: string; severity: string }[] };
 export type AnswerResult = {
-  summary: string;
-  checklist: string[];
-  draft: string;
+  answer: string;
   evidence: { id: string; doc_id?: string; ord: number; page?: number | null; text: string }[];
+  low_evidence?: boolean;
+  confidence?: number;
+  eval_id?: string;
 };
 
 export async function parseError(r: Response): Promise<string> {
@@ -106,8 +109,17 @@ export async function analyzeDoc(docId: string): Promise<AnalyzeResult> {
   return r.json();
 }
 
-export async function ask(query: string, keyword?: string): Promise<AnswerResult> {
-  const r = await withRetry(() => fetch(`${API}/answer`, { method: "POST", headers: H(), body: JSON.stringify({ query, keyword }), ...WITH_CREDENTIALS }));
+export async function ask(query: string, keyword?: string, opts?: { docId?: string; answerMode?: 'structured' | 'concise' }): Promise<AnswerResult> {
+  const body: any = { query, keyword, doc_id: opts?.docId, answer_mode: opts?.answerMode };
+  let r = await withRetry(() => fetch(`${API}/answer`, { method: "POST", headers: H(), body: JSON.stringify(body), ...WITH_CREDENTIALS }));
+  if (r.status === 401 || r.status === 403) {
+    const demoUser = process.env.NEXT_PUBLIC_DEMO_USER;
+    const demoPass = process.env.NEXT_PUBLIC_DEMO_PASS;
+    if (demoUser && demoPass) {
+      try { await login(demoUser, demoPass); } catch {}
+      r = await fetch(`${API}/answer`, { method: "POST", headers: H(), body: JSON.stringify(body), ...WITH_CREDENTIALS });
+    }
+  }
   if (!r.ok) throw new Error(await parseError(r));
   return r.json();
 }

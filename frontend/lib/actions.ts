@@ -31,9 +31,9 @@ export async function analyzeDoc(docId: string): Promise<Result<AnalyzeResult>> 
   }
 }
 
-export async function ask(query: string, keyword?: string): Promise<Result<AnswerResult>> {
+export async function ask(query: string, keyword?: string, opts?: { docId?: string; answerMode?: 'structured' | 'concise' }): Promise<Result<AnswerResult>> {
   try {
-    const data = await apiAsk(query, keyword);
+    const data = await apiAsk(query, keyword, opts);
     return { ok: true, data };
   } catch (e: any) {
     return { ok: false, error: e?.message || String(e) };

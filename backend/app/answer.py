@@ -2,6 +2,8 @@ import os
 from typing import List, Dict
 from openai import OpenAI
 
+SIMPLE_DEFAULT = os.getenv("SIMPLE_ANSWER", "false").lower() in ("1", "true", "yes")
+
 SYSTEM_PROMPT = """You are an expert contract analyst. Write concise, professional outputs.
 Rules:
 - Use only the provided Evidence passages; if insufficient, say 'Insufficient evidence.'
@@ -66,59 +68,137 @@ def answer_with_evidence(query: str, passages: List[Dict], model: str) -> tuple[
     confidence = estimate_confidence(passages)
     
     ev = format_evidence(passages)
-    
-    # Offline LLM mode: generate a deterministic, concise draft without network
-    if os.getenv("OFFLINE_LLM", "false").lower() in ("1", "true", "yes"):
-        bullets: List[str] = []
-        for p in passages[:3]:
-            t = (p.get("text") or "").strip().replace("\n", " ")
-            if len(t) > 140:
-                t = t[:140] + "…"
-            bullets.append(f"• {t}")
-        if not bullets:
-            bullets = ["• Insufficient evidence."]
-        # Simple checklist with placeholders
-        checklist = (
-            "Item | Severity | Evidence #\n"
-            "---|---|---\n"
-            "Liability cap | High | 1\n"
-            "Termination terms | Medium | 2\n"
-            "Jurisdiction | Low | 3\n"
-        )
-        draft_lines: List[str] = []
-        for i, _ in enumerate(passages[:5], 1):
-            draft_lines.append(f"{i}. Refer to [Evidence #{i}] for relevant details.")
-        if not draft_lines:
-            draft_lines = ["1. Insufficient evidence."]
-        content = "\n".join([
-            "Executive Summary:",
-            *bullets,
-            "",
-            "Risk Checklist:",
-            checklist,
-            "",
-            "Response Draft:",
-            *draft_lines,
-        ])
-        return content.strip(), is_low_evidence, confidence
 
-    # Modify system prompt if evidence is insufficient
-    system_prompt = SYSTEM_PROMPT
-    if is_low_evidence:
-        system_prompt = "Evidence may be insufficient; produce a cautious draft and explicitly mark 'Insufficient evidence' where needed.\n\n" + SYSTEM_PROMPT
-    
-    user = f"Query: {query}\n\nEvidence Passages:\n{ev}\n\nProduce:\n1) Executive Summary (3 bullets)\n2) Risk Checklist (table: Item | Severity | Evidence #)\n3) Response Draft (numbered), each point with [Evidence #]."
-    
+    # If simple answer mode, produce a concise paragraph-only answer
+    simple_mode = SIMPLE_DEFAULT
+
+    # Offline LLM mode
+    if os.getenv("OFFLINE_LLM", "false").lower() in ("1", "true", "yes"):
+        if simple_mode:
+            # Build one concise paragraph from top evidence
+            bits: List[str] = []
+            for p in passages[:3]:
+                t = (p.get("text") or "").strip().replace("\n", " ")
+                if len(t) > 200:
+                    t = t[:200] + "…"
+                bits.append(t)
+            if not bits:
+                content = "Insufficient evidence."
+            else:
+                content = f"Answer: { ' '.join(bits) }"
+            return content.strip(), is_low_evidence, confidence
+        else:
+            # Legacy structured output
+            bullets: List[str] = []
+            for p in passages[:3]:
+                t = (p.get("text") or "").strip().replace("\n", " ")
+                if len(t) > 140:
+                    t = t[:140] + "…"
+                bullets.append(f"• {t}")
+            if not bullets:
+                bullets = ["• Insufficient evidence."]
+            checklist = (
+                "Item | Severity | Evidence #\n"
+                "---|---|---\n"
+                "Liability cap | High | 1\n"
+                "Termination terms | Medium | 2\n"
+                "Jurisdiction | Low | 3\n"
+            )
+            draft_lines: List[str] = []
+            for i, _ in enumerate(passages[:5], 1):
+                draft_lines.append(f"{i}. Refer to [Evidence #{i}] for relevant details.")
+            if not draft_lines:
+                draft_lines = ["1. Insufficient evidence."]
+            content = "\n".join([
+                "Executive Summary:",
+                *bullets,
+                "",
+                "Risk Checklist:",
+                checklist,
+                "",
+                "Response Draft:",
+                *draft_lines,
+            ])
+            return content.strip(), is_low_evidence, confidence
+
+    # Online LLM mode
     client = get_client()
-    resp = client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role":"system","content":system_prompt},
-            {"role":"user","content":user}
-        ],
-        temperature=0.2,
-        max_tokens=900
-    )
-    
-    answer = (resp.choices[0].message.content or "").strip()
-    return answer, is_low_evidence, confidence
+    if simple_mode:
+        system_prompt = (
+            "You are a concise, accurate assistant. Answer the question using only the provided evidence. "
+            "If evidence is insufficient, say 'Insufficient evidence.' Output a single short paragraph."
+        )
+        if is_low_evidence:
+            system_prompt = "Evidence may be insufficient. Be cautious. " + system_prompt
+        user = f"Question: {query}\n\nEvidence:\n{ev}\n\nWrite one concise paragraph answer only."
+    else:
+        # Strict JSON format for structured output
+        system_prompt = (
+            "You are an expert analyst. Respond in strict JSON with keys: "
+            "summary (string, 2-4 sentences), bullets (array of 3-5 concise strings), citations (array of integers referencing Evidence #)."
+        )
+        if is_low_evidence:
+            system_prompt = "Evidence may be insufficient; be cautious. " + system_prompt
+        user = f"Question: {query}\n\nEvidence (numbered):\n{ev}\n\nReturn JSON only."
+        try:
+            resp = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role":"system","content":system_prompt},
+                    {"role":"user","content":user}
+                ],
+                temperature=0.2,
+                max_tokens=900,
+                response_format={"type": "json_object"}
+            )
+            import json as _json
+            raw = (resp.choices[0].message.content or "").strip()
+            data = _json.loads(raw)
+            summary = str(data.get("summary") or "").strip()
+            bullets = [str(b).strip() for b in (data.get("bullets") or []) if str(b).strip()]
+            citations = [int(x) for x in (data.get("citations") or []) if isinstance(x, (int, float))]
+            if len(bullets) < 3 and summary:
+                # ensure at least 3 bullets by splitting summary
+                parts = [p.strip() for p in summary.split(".") if p.strip()]
+                bullets = (bullets + parts)[:3]
+            # Render markdown
+            lines: List[str] = []
+            if summary:
+                lines.append(summary)
+            if bullets:
+                lines.append("")
+                lines.append("Key Points:")
+                for b in bullets:
+                    lines.append(f"- {b}")
+            if passages:
+                lines.append("")
+                lines.append("Cited Evidence:")
+                # Render top 3 evidence with numbering
+                for i, p in enumerate(passages[:5], 1):
+                    tag = "(cited)" if i in citations else ""
+                    snippet = (p.get("text") or "").strip().replace("\n", " ")
+                    if len(snippet) > 260:
+                        snippet = snippet[:260] + "…"
+                    lines.append(f"[{i}] {snippet} {tag}")
+            content = "\n".join(lines).strip()
+            if not content:
+                content = "Insufficient evidence."
+            return content, is_low_evidence, confidence
+        except Exception:
+            # Fallback to concise paragraph
+            system_prompt = (
+                "You are a concise, accurate assistant. Answer using only the evidence. "
+                "If insufficient, say 'Insufficient evidence.' One short paragraph."
+            )
+            user = f"Question: {query}\n\nEvidence:\n{ev}"
+            resp = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role":"system","content":system_prompt},
+                    {"role":"user","content":user}
+                ],
+                temperature=0.2,
+                max_tokens=500
+            )
+            answer = (resp.choices[0].message.content or "").strip()
+            return answer, is_low_evidence, confidence

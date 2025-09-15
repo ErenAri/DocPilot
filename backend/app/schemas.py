@@ -17,6 +17,8 @@ class QueryReq(BaseModel):
     top_k: int = 10
     filter_category: Optional[str] = None
     keyword: Optional[str] = None
+    doc_id: Optional[str] = None
+    answer_mode: Optional[str] = None  # 'structured' | 'concise'
 
 class Passage(BaseModel):
     id: str
