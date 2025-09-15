@@ -234,15 +234,17 @@ export function UploadCard() {
           </div>
         )}
 
-        <div className="space-y-2">
-          <Label>Raw Text</Label>
-          <Textarea value={text} onChange={(e) => setText(e.target.value)} placeholder="Paste text..." rows={6} className="resize-y bg-white/5" />
+        <details className="space-y-2 rounded-xl border border-white/10 bg-white/5 p-3">
+          <summary className="cursor-pointer text-sm font-semibold">Raw Text (optional)</summary>
+          <div className="text-xs text-white/70 -mt-1 mb-2">Paste plain text to ingest without uploading a file. Handy for quick tests and small notes.</div>
+          <Label htmlFor="rawtext" className="sr-only">Raw Text</Label>
+          <Textarea id="rawtext" value={text} onChange={(e) => setText(e.target.value)} placeholder="Paste text..." rows={6} className="resize-y bg-white/5" />
           <Button onClick={uploadText} disabled={!text.trim() || isUploading} className="bg-gradient-to-r from-sky-500 to-cyan-500 hover:from-sky-400 hover:to-cyan-400">
             {isUploading ? "Submitting..." : (
               <span className="inline-flex items-center gap-2"><FileText className="w-4 h-4" /> Ingest Text</span>
             )}
           </Button>
-        </div>
+        </details>
       </CardContent>
     </Card>
   );
