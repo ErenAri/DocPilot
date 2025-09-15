@@ -47,8 +47,8 @@ export function UploadCard() {
     });
     if (fl.length) {
       addToQueue(fl);
+      // Auto-start is handled by the queue useEffect
       await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
-      processQueue();
     }
   }, []);
 
@@ -56,8 +56,7 @@ export function UploadCard() {
     const next = selected.map((f) => ({ id: `${f.name}-${f.size}-${Date.now()}`, file: f, status: "pending" as const, progress: 0 }));
     setFiles(prev => [...prev, ...selected]);
     setQueue(prev => [...prev, ...next]);
-    // Schedule immediate processing on next tick to use updated state
-    setTimeout(() => { processQueue(); }, 0);
+    // Processing is triggered by the queue useEffect
   }
 
   async function uploadOneDirect(item: QueueItem) {
@@ -194,9 +193,7 @@ export function UploadCard() {
                 const arr = Array.from(e.target.files || []);
                 if (arr.length === 0) return;
                 addToQueue(arr);
-                // Auto-start upload
                 await new Promise<void>((r) => requestAnimationFrame(() => r()));
-                processQueue();
               }}
             />
             <Button

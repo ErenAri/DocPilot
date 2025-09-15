@@ -246,6 +246,14 @@ export default function DocumentsPage() {
     return s.replace(/\b\w/g, (m) => m.toUpperCase());
   }
 
+  // Persist last analysis per document
+  const [analysisCache, setAnalysisCache] = useState<Record<string, AnalyzeResult>>({});
+  useEffect(() => {
+    try {
+      setAnalysis(selectedId ? analysisCache[selectedId] || null : null);
+    } catch {}
+  }, [selectedId, analysisCache]);
+
   async function runAnalysis() {
     if (!selectedId) return;
     setAnalyzing(true);
@@ -258,6 +266,7 @@ export default function DocumentsPage() {
         toastError(res.error || "Analyze failed");
       } else {
         setAnalysis(res.data);
+        setAnalysisCache(prev => ({ ...prev, [selectedId]: res.data }));
         toastSuccess("Analysis complete");
       }
     } catch (e: any) {
@@ -520,23 +529,7 @@ export default function DocumentsPage() {
           </CardContent>
         </Card>
 
-        {/* Right: Ask this corpus */}
-        <Card className="rounded-2xl bg-white/5 backdrop-blur border border-white/10 shadow-xl">
-          <CardHeader>
-            <CardTitle className="text-base font-semibold">Ask this corpus</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-3">
-            <QAPanel
-              askError={askError}
-              askQ={askQ}
-              onAskQChange={setAskQ}
-              asking={asking}
-              onAsk={runAsk}
-              onExportPdf={exportAnswerPdf}
-              answer={answer}
-            />
-          </CardContent>
-        </Card>
+        {/* Right: Ask panel removed per request */}
       </div>
     </div>
   );
