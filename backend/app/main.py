@@ -1808,7 +1808,18 @@ def api_login(body: LoginBody, request: Request):
         if cookie_samesite_choice in ("lax", "strict", "none"):
             cookie_samesite = cast(Literal['lax','strict','none'], cookie_samesite_choice)
         if use_cookie_auth:
-            resp = JSONResponse({"ok": True, "user_id": user_id_value or "", "username": username_value or body.username, "org_id": resolved_org})
+            # Include token in body for local development (localhost/http) so SPA can use Bearer auth
+            include_token = False
+            try:
+                host = (request.url.hostname or "").lower()
+                scheme = (request.url.scheme or "").lower()
+                include_token = host in ("localhost", "127.0.0.1") and scheme != "https"
+            except Exception:
+                include_token = False
+            payload = {"ok": True, "user_id": user_id_value or "", "username": username_value or body.username, "org_id": resolved_org}
+            if include_token:
+                payload.update({"token": jwt_token})
+            resp = JSONResponse(payload)
             resp.set_cookie(
                 key=cookie_name,
                 value=jwt_token,

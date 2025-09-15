@@ -13,7 +13,8 @@ export async function apiFetch(path: string, init?: (RequestInit & { timeoutMs?:
     if (isProd) {
       if (headers.has("Authorization")) headers.delete("Authorization");
     } else if (token && !headers.has("Authorization")) {
-      headers.set("Authorization", `Bearer ${token}`);
+      // If token is a placeholder (cookie-mode), do not send Bearer header
+      if (token !== "cookie") headers.set("Authorization", `Bearer ${token}`);
     }
     // Organization & role headers (required by API). Default to demo/viewer if not provided
     if (!headers.has("X-Org-Id")) headers.set("X-Org-Id", orgId || "demo");
