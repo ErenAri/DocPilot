@@ -2610,7 +2610,27 @@ def get_document_content(doc_id: str):
         chunks_data = get_document_chunks(conn, doc_id, org_id)
         
         if not chunks_data:
-            raise HTTPException(status_code=404, detail="Document not found or has no content")
+            # Fallback: try to read raw text and present as virtual chunks for preview
+            try:
+                raw_text = fetch_document_text(conn, doc_id)
+            except Exception:
+                raw_text = None
+            if raw_text:
+                try:
+                    parts = make_chunks(raw_text, 800, 100)
+                except Exception:
+                    parts = [raw_text]
+                chunks = [
+                    DocumentChunk(
+                        id=f"virt-{i}",
+                        doc_id=str(doc_id),
+                        ord=i,
+                        text=str(t)
+                    ) for i, t in enumerate(parts)
+                ]
+                return DocumentContentResp(chunks=chunks)
+            # Gracefully return empty list instead of 404
+            return DocumentContentResp(chunks=[])
 
         chunks = [
             DocumentChunk(
@@ -2623,5 +2643,34 @@ def get_document_content(doc_id: str):
         return DocumentContentResp(chunks=chunks)
     finally:
         if conn:
+            conn.close()
+
+@app.delete("/documents/{doc_id}", tags=["documents"])
+def delete_document(doc_id: str):
+    # Admin-only operation
+    if not is_allowed(["admin"]):
+        raise HTTPException(status_code=403, detail="forbidden")
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        # Best-effort: delete chunks first, then the document record
+        try:
+            cur.execute("DELETE FROM chunks WHERE doc_id = %s", (doc_id,))
+        except Exception:
+            pass
+        cur.execute("DELETE FROM documents WHERE id = %s", (doc_id,))
+        conn.commit()
+        try:
+            audit_event("documents.delete", query=doc_id)
+        except Exception:
+            pass
+        return {"status": "ok"}
+    except Exception as e:
+        conn.rollback()
+        return standardized_error_response(e)
+    finally:
+        try:
+            cur.close()
+        finally:
             conn.close()
 

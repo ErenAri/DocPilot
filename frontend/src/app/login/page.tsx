@@ -57,6 +57,12 @@ export default function LoginPage() {
             if (process.env.NODE_ENV !== "production") {
               const token = (data && typeof data.token === "string" && data.token) ? data.token : "cookie";
               try { localStorage.setItem("docpilot_token", token); } catch {}
+              // Persist role for simple UI gating (e.g., admin delete)
+              try { if (data && typeof data.username === "string") {
+                const uname = (data.username || "").toLowerCase();
+                const role = uname === "admin" ? "admin" : (uname === "analyst" || uname === "editor" ? "editor" : "viewer");
+                localStorage.setItem("docpilot_role", role);
+              }} catch {}
             }
             // After login, go to ingest (home) as requested
             window.location.href = "/";

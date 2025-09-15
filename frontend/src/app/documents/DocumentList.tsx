@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useMemo, useRef } from "react";
 import type { DocumentInfo } from "../../../lib/actions";
+import { deleteDocument } from "../../../lib/actions";
 
 export interface DocumentListProps {
   docs: DocumentInfo[];
@@ -18,6 +19,7 @@ export interface DocumentListProps {
 
 export function DocumentList({ docs, loading, hasMore, loadMorePending, onLoadMore, filtered, selectedId, bulkMode, selectedIds, toggleSelect, onSelect }: DocumentListProps) {
   const listRef = useRef<HTMLDivElement | null>(null);
+  const isAdmin = typeof window !== "undefined" ? (localStorage.getItem("docpilot_role") || "").toLowerCase() === "admin" : false;
 
   useEffect(() => {
     const el = listRef.current;
@@ -69,7 +71,27 @@ export function DocumentList({ docs, loading, hasMore, loadMorePending, onLoadMo
                 )}
                 <div className="font-medium truncate">{d.title || d.id}</div>
               </div>
-              <div className="text-xs text-white/60 whitespace-nowrap">{formatDate(d.created_at)}</div>
+              <div className="flex items-center gap-2 whitespace-nowrap">
+                <div className="text-xs text-white/60">{formatDate(d.created_at)}</div>
+                {isAdmin && (
+                  <button
+                    type="button"
+                    onClick={async (ev) => {
+                      ev.stopPropagation();
+                      const ok = window.confirm("Bu belgeyi tamamen silmek üzeresiniz. Emin misiniz?");
+                      if (!ok) return;
+                      const res = await deleteDocument(d.id);
+                      if (!res.ok) {
+                        alert(`Silme başarısız: ${res.error}`);
+                      } else {
+                        window.location.reload();
+                      }
+                    }}
+                    className="text-xs px-2 py-1 rounded bg-red-500/20 border border-red-400/30 hover:bg-red-500/30"
+                    title="Delete document"
+                  >Sil</button>
+                )}
+              </div>
             </div>
             {entries.length > 0 && (
               <div className="mt-2 flex flex-wrap gap-1">
