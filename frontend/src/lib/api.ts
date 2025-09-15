@@ -1,7 +1,8 @@
 export const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
 export async function apiFetch(path: string, init?: (RequestInit & { timeoutMs?: number })) {
-  const timeoutMs = init?.timeoutMs ?? 8000;
+  // Increase default timeout to better accommodate slower endpoints (e.g., analysis, admin metrics)
+  const timeoutMs = init?.timeoutMs ?? 20000;
   const controller = new AbortController();
   const id = setTimeout(() => controller.abort(), timeoutMs);
   try {
