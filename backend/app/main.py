@@ -384,15 +384,17 @@ async def log_requests(request: Request, call_next):
                 return JSONResponse(status_code=401, content={"error": "auth_required", "request_id": request_id})
         except Exception:
             pass
-        # Policy check (path-based allow list)
+        # Policy check (path-based allow list) - skip for public paths
         try:
             path = request.url.path
-            for prefix, roles in POLICY_PATH_ROLES.items():
-                if path.startswith(prefix):
-                    current_role = role_var.get("viewer") or "viewer"
-                    if current_role not in roles and current_role != "admin":
-                        return JSONResponse(status_code=403, content={"error": "forbidden", "request_id": request_id})
-                    break
+            public_prefixes = ("/api/login", "/ap/logn", "/health", "/health/db", "/metrics", "/ui/", "/favicon.ico", "/docs", "/openapi.json", "/documents", "/analyze/doc", "/ingest/file")
+            if not any(path.startswith(p) for p in public_prefixes):
+                for prefix, roles in POLICY_PATH_ROLES.items():
+                    if path.startswith(prefix):
+                        current_role = role_var.get("viewer") or "viewer"
+                        if current_role not in roles and current_role != "admin":
+                            return JSONResponse(status_code=403, content={"error": "forbidden", "request_id": request_id})
+                        break
         except Exception:
             pass
         response = await call_next(request)
@@ -951,10 +953,14 @@ def ingest_text(payload: IngestText, request: Request):
         conn = get_conn()
         org_id = org_id_var.get(None) # Use context var
 
-        # --- New: Analyze text for summary and keywords ---
-        analysis_results = analyze_text_with_llm(payload.text)
-        merged_meta = {**(payload.meta or {}), **analysis_results}
-        # ---
+        # Optional analysis for summary/keywords (can be slow). Enable via ANALYZE_ON_INGEST=true
+        merged_meta = payload.meta or {}
+        try:
+            if os.getenv("ANALYZE_ON_INGEST", "false").lower() in ("1","true","yes"):
+                analysis_results = analyze_text_with_llm(payload.text)
+                merged_meta = {**merged_meta, **(analysis_results or {})}
+        except Exception:
+            pass
 
         upsert_document(conn, doc_id, payload.title, merged_meta, org_id, user_id_var.get(""))
         # DLP redaction before chunking (GDPR_MODE toggle)
@@ -1015,6 +1021,13 @@ async def ingest_file(request: Request, file: UploadFile = File(...), title: str
         # Allow uploads without role check since it's in public_prefixes
         log_with_request_id("Processing file ingestion", "info", filename=file.filename)
         content = await file.read()
+        # Enforce max file size if configured
+        try:
+            max_mb = int(os.getenv("FILE_MAX_MB", "0"))
+        except Exception:
+            max_mb = 0
+        if max_mb and len(content) > max_mb * 1024 * 1024:
+            return JSONResponse(status_code=413, content={"error": f"file too large (>{max_mb}MB)"})
         name_lower = (file.filename or "").lower()
         text_raw = ""
         page_limit = None
