@@ -10,12 +10,27 @@ from pydantic import BaseModel
 from pypdf import PdfReader
 from docx import Document as DocxDocument
 from typing import List, Dict, Any, cast, Optional, Sequence, Mapping, Literal, Union
-from opentelemetry import trace
-from opentelemetry.sdk.resources import Resource
-from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import BatchSpanProcessor
-from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
-from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+# Optional OpenTelemetry tracing
+try:
+    from opentelemetry import trace
+    from opentelemetry.sdk.resources import Resource
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import BatchSpanProcessor
+    from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+    from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+    OTEL_AVAILABLE = True
+except ImportError:
+    OTEL_AVAILABLE = False
+    # Create a dummy tracer for when opentelemetry is not available
+    class DummyTracer:
+        def start_as_current_span(self, name):
+            return DummySpan()
+    class DummySpan:
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            pass
+    trace = DummyTracer()
 from .schemas import IngestText, IngestFileResp, QueryReq, QueryResp, Passage, AnswerResp
 from .chunk import make_chunks
 from .embeddings import embed_texts, to_vector_literal, score_pairs, redact_pii
@@ -69,14 +84,18 @@ metrics = {
 app = FastAPI(title="DocPilot API")
 # OpenTelemetry setup (optional via env OTEL_EXPORTER_OTLP_ENDPOINT)
 otel_endpoint = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
-if otel_endpoint:
+if otel_endpoint and OTEL_AVAILABLE:
     resource = Resource.create({"service.name": "docpilot-backend"})
     provider = TracerProvider(resource=resource)
     span_exporter = OTLPSpanExporter(endpoint=otel_endpoint)
     provider.add_span_processor(BatchSpanProcessor(span_exporter))
     trace.set_tracer_provider(provider)
     FastAPIInstrumentor.instrument_app(app)
-tracer = trace.get_tracer("docpilot")
+
+if OTEL_AVAILABLE:
+    tracer = trace.get_tracer("docpilot")
+else:
+    tracer = trace  # Use the dummy tracer
 
 # --- Auth helpers ---
 def _extract_jwt(request: Request) -> Optional[str]:
