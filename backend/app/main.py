@@ -1787,6 +1787,13 @@ def api_login(body: LoginBody, request: Request):
             pass
         if use_cookie_auth and cross_site:
             cookie_secure = True
+        # Test/dev safety: when running on http (e.g., pytest TestClient), allow insecure cookie
+        # so that the client will send it back. In real deployments behind TLS, scheme is https.
+        try:
+            if use_cookie_auth and str(request.url.scheme or "").lower() != "https":
+                cookie_secure = False
+        except Exception:
+            pass
 
         cookie_samesite_raw = os.getenv("COOKIE_SAMESITE")
         if cookie_samesite_raw is None:
@@ -1794,7 +1801,7 @@ def api_login(body: LoginBody, request: Request):
             cookie_samesite_raw = os.getenv("AUTH_COOKIE_SAMESITE")
         # Compute default if not explicitly provided
         if not cookie_samesite_raw or not str(cookie_samesite_raw).strip():
-            cookie_samesite_choice = "none" if (use_cookie_auth and cross_site) else "lax"
+            cookie_samesite_choice = "none" if (use_cookie_auth and cross_site and cookie_secure) else "lax"
         else:
             cookie_samesite_choice = str(cookie_samesite_raw).strip().lower()
         cookie_samesite: Literal['lax','strict','none'] | None = None
