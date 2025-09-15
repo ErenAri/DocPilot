@@ -69,6 +69,16 @@ export default function OpsPage() {
     <div className="p-2 sm:p-4 text-white">
       <div className="max-w-3xl mx-auto space-y-6">
         <h1 className="text-3xl font-bold tracking-tight">Ops & SLO</h1>
+        <div className="rounded-xl bg-white/5 border border-white/10 p-3 text-xs text-white/80">
+          <div className="font-semibold mb-1">What is this?</div>
+          <ul className="list-disc list-inside space-y-1">
+            <li><span className="font-semibold">SLO (24h)</span>: average and p95 latency, low‑evidence rate computed from recent eval logs.</li>
+            <li><span className="font-semibold">Status</span>: backend configuration flags (OTEL, S3, API key, org requirement).</li>
+            <li><span className="font-semibold">Calibration</span>: recalculates relevance threshold used by analytics/QA dashboards.</li>
+            <li><span className="font-semibold">Self‑Heal</span>: runs index/schema maintenance tasks; <span className="underline">safe</span> for production.</li>
+            <li><span className="font-semibold">Compact/Dedup</span>: removes duplicate chunks and reclaims storage.</li>
+          </ul>
+        </div>
         <div className="grid gap-4 md:grid-cols-2">
           <Card className="bg-white/5 border-white/10">
             <CardHeader><CardTitle>SLO (24h)</CardTitle></CardHeader>

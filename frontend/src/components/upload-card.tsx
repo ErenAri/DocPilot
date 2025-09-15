@@ -41,9 +41,8 @@ export function UploadCard() {
   const onDrop = useCallback(async (e: React.DragEvent<HTMLDivElement>) => {
     e.preventDefault();
     const fl = Array.from(e.dataTransfer.files || []).filter(f => {
-      const isPdfType = f.type === "application/pdf";
-      const isPdfName = (f.name || "").toLowerCase().endsWith(".pdf");
-      return isPdfType || isPdfName;
+      const name = (f.name || "").toLowerCase();
+      return name.endsWith(".pdf") || name.endsWith(".docx") || name.endsWith(".txt");
     });
     if (fl.length) {
       addToQueue(fl);
@@ -187,7 +186,7 @@ export function UploadCard() {
               ref={fileInputRef}
               multiple
               type="file"
-              accept="application/pdf"
+              accept=".pdf,.docx,.txt"
               className="hidden"
               onChange={async (e) => {
                 const arr = Array.from(e.target.files || []);

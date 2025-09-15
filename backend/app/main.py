@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from pypdf import PdfReader
+from docx import Document as DocxDocument
 from typing import List, Dict, Any, cast, Optional, Sequence, Mapping, Literal
 from opentelemetry import trace
 from opentelemetry.sdk.resources import Resource
@@ -1015,8 +1016,21 @@ async def ingest_file(request: Request, file: UploadFile = File(...), title: str
             return JSONResponse(status_code=403, content={"error": "forbidden"})
         log_with_request_id("Processing file ingestion", "info", filename=file.filename)
         content = await file.read()
-        reader = PdfReader(io.BytesIO(content))
-        text_raw = "\n".join([p.extract_text() or "" for p in reader.pages])
+        name_lower = (file.filename or "").lower()
+        text_raw = ""
+        if name_lower.endswith(".pdf"):
+            reader = PdfReader(io.BytesIO(content))
+            text_raw = "\n".join([p.extract_text() or "" for p in reader.pages])
+        elif name_lower.endswith(".docx"):
+            doc = DocxDocument(io.BytesIO(content))
+            text_raw = "\n".join([p.text or "" for p in doc.paragraphs])
+        elif name_lower.endswith(".txt"):
+            try:
+                text_raw = content.decode("utf-8", errors="ignore")
+            except Exception:
+                text_raw = str(content)
+        else:
+            return JSONResponse(status_code=400, content={"error": "Unsupported file type. Use PDF, DOCX, or TXT."})
         gdpr_mode = os.getenv("GDPR_MODE", "false").lower() in ("1","true","yes")
         text = redact_pii(text_raw) if gdpr_mode else text_raw
         
