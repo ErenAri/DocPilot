@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: docpilot-backend
+    env: docker
+    plan: free
+    autoDeploy: true
+    healthCheckPath: /health
+    buildCommand: docker build -t docpilot-backend .
+    startCommand: docker run -p $PORT:8000 docpilot-backend
+    envVars:
+      - key: TIDB_HOST
+        sync: false
+      - key: TIDB_PORT
+        sync: false
+      - key: TIDB_USER
+        sync: false
+      - key: TIDB_PASSWORD
+        sync: false
+      - key: TIDB_DATABASE
+        sync: false
+      - key: DB_URL
+        sync: false
