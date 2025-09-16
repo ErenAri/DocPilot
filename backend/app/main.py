@@ -10,6 +10,8 @@ from pydantic import BaseModel
 from pypdf import PdfReader
 from docx import Document as DocxDocument
 from typing import List, Dict, Any, cast, Optional, Sequence, Mapping, Literal, Union
+from pathlib import Path
+from starlette.staticfiles import StaticFiles
 # Optional OpenTelemetry tracing
 try:
     from opentelemetry import trace
@@ -313,8 +315,14 @@ app.add_middleware(
 )
 
 # Build a path to the 'frontend' directory relative to this script's location
-frontend_dir = os.path.join(os.path.dirname(__file__), "..", "..", "frontend")
-app.mount("/ui", StaticFiles(directory=frontend_dir), name="ui")
+try:
+    frontend_dir = Path(__file__).resolve().parent / "../../frontend"
+    if frontend_dir.exists():
+        app.mount("/ui", StaticFiles(directory=str(frontend_dir)), name="ui")
+    else:
+        pass
+except Exception:
+    pass
 
 # Request ID and structured logging middleware
 @app.middleware("http")
