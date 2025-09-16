@@ -2,6 +2,9 @@
 
 DocPilot is a comprehensive document analysis and Q&A platform built with modern web technologies. It provides intelligent document ingestion, compliance analysis, and AI-powered question answering capabilities.
 
+^^ Live Demo
+- https://www.docpilot.cloud/
+
 ## 🚀 Features
 
 ### Core Functionality
